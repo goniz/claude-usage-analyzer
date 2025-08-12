@@ -42,24 +42,89 @@ class SessionSummary:
 class ClaudeUsageAnalyzer:
     # Claude pricing (as of January 2025) - prices per 1M tokens
     PRICING = {
-        'claude-sonnet-4-20250514': {
-            'input': 3.00,  # $3 per 1M input tokens
-            'output': 15.00,  # $15 per 1M output tokens
-            'cache_write': 3.75,  # $3.75 per 1M cache write tokens
-            'cache_read': 0.30,  # $0.30 per 1M cache read tokens
+        # Latest Claude 4 Models
+        'claude-4.1-opus': {
+            'input': 15.00,
+            'output': 75.00,
+            'cache_write': 18.75,
+            'cache_read': 1.50,
         },
+        'claude-opus-4.1': {
+            'input': 15.00,
+            'output': 75.00,
+            'cache_write': 18.75,
+            'cache_read': 1.50,
+        },
+        'claude-4-opus': {
+            'input': 15.00,
+            'output': 75.00,
+            'cache_write': 18.75,
+            'cache_read': 1.50,
+        },
+        'claude-sonnet-4-20250514': {
+            'input': 3.00,  # ≤200K tokens
+            'output': 15.00,  # ≤200K tokens
+            'cache_write': 3.75,
+            'cache_read': 0.30,
+        },
+        'claude-4-sonnet': {
+            'input': 3.00,  # ≤200K tokens
+            'output': 15.00,  # ≤200K tokens
+            'cache_write': 3.75,
+            'cache_read': 0.30,
+        },
+        'claude-3-5-haiku-20241022': {
+            'input': 0.80,
+            'output': 4.00,
+            'cache_write': 1.00,
+            'cache_read': 0.08,
+        },
+        'claude-haiku-3-5': {
+            'input': 0.80,
+            'output': 4.00,
+            'cache_write': 1.00,
+            'cache_read': 0.08,
+        },
+        
+        # Legacy Models
         'claude-3-5-sonnet-20241022': {
             'input': 3.00,
             'output': 15.00,
             'cache_write': 3.75,
             'cache_read': 0.30,
         },
-        'claude-3-5-haiku-20241022': {
-            'input': 1.00,
-            'output': 5.00,
-            'cache_write': 1.25,
-            'cache_read': 0.10,
-        }
+        'claude-3-opus': {
+            'input': 15.00,
+            'output': 75.00,
+            'cache_write': 18.75,
+            'cache_read': 1.50,
+        },
+        'claude-3-haiku': {
+            'input': 0.25,
+            'output': 1.25,
+            'cache_write': 0.30,
+            'cache_read': 0.025,
+        },
+        
+        # Common model name variations
+        'claude-4': {  # Default to Sonnet 4
+            'input': 3.00,
+            'output': 15.00,
+            'cache_write': 3.75,
+            'cache_read': 0.30,
+        },
+        'claude-3.5-sonnet': {
+            'input': 3.00,
+            'output': 15.00,
+            'cache_write': 3.75,
+            'cache_read': 0.30,
+        },
+        'claude-3.5-haiku': {
+            'input': 0.80,
+            'output': 4.00,
+            'cache_write': 1.00,
+            'cache_read': 0.08,
+        },
     }
     
     def __init__(self, claude_dir: str = None):

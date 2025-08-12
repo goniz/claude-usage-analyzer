@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is a Python utility that analyzes Claude Code session files to provide token usage summaries and cost estimates. The tool parses `.jsonl` session files from `~/.claude/projects/` and generates comprehensive reports.
+This is a Python utility that analyzes Claude Code session files to provide token usage summaries and cost estimates. The tool parses `.jsonl` session files from `~/.claude/projects/` and generates comprehensive reports. The project uses uv for dependency management and Python 3.12.
 
 ## Architecture
 
 ### Core Components
 
-- **ClaudeUsageAnalyzer** (claude_usage_analyzer.py:42): Main class that handles session file discovery, parsing, and analysis
-- **SessionSummary** (claude_usage_analyzer.py:28): Data class representing a single Claude session with token usage metrics
-- **TokenUsage** (claude_usage_analyzer.py:20): Data class for tracking different types of token usage (input, output, cache read/write)
+- **ClaudeUsageAnalyzer** (main.py:42): Main class that handles session file discovery, parsing, and analysis
+- **SessionSummary** (main.py:28): Data class representing a single Claude session with token usage metrics
+- **TokenUsage** (main.py:20): Data class for tracking different types of token usage (input, output, cache read/write)
 
 ### Data Processing Flow
 
@@ -33,7 +33,13 @@ This is a Python utility that analyzes Claude Code session files to provide toke
 ### Running the Analyzer
 
 ```bash
-python3 claude_usage_analyzer.py
+uv run main.py
+```
+
+or
+
+```bash
+python3 main.py
 ```
 
 The script automatically discovers the Claude directory at `~/.claude` and processes all session files.
@@ -46,6 +52,16 @@ The script automatically discovers the Claude directory at `~/.claude` and proce
 - Usage breakdowns by model and project
 - Recent session activity (last 10 sessions)
 
+## Development
+
+### Setup
+```bash
+uv sync
+```
+
+### Dependencies
+Project uses uv with Python 3.12 as specified in `.python-version`.
+
 ## Pricing Configuration
 
-Current pricing is hardcoded in `ClaudeUsageAnalyzer.PRICING` (claude_usage_analyzer.py:44) and reflects January 2025 rates. Update these values when Claude pricing changes.
+Current pricing is hardcoded in `ClaudeUsageAnalyzer.PRICING` (main.py:44) and reflects January 2025 rates. Update these values when Claude pricing changes.
