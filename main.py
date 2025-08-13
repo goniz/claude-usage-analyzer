@@ -60,38 +60,40 @@ class ModelsDotDev:
             response.raise_for_status()
             data = response.json()
             
-            # Transform API data to our pricing format
+            # Transform API data to our pricing format with provider info
             pricing = {}
             
-            # Check all possible sections for all models
-            all_sections = data.keys() if isinstance(data, dict) else []
-            
-            for section_name in all_sections:
-                section_data = data.get(section_name, {})
-                if section_data and isinstance(section_data, dict):
-                    # Check if there's a 'models' key containing the actual model data
-                    models_data = section_data.get('models', {})
-                    if isinstance(models_data, dict):
-                        for model_id, model_data in models_data.items():
-                            if not isinstance(model_data, dict):
-                                continue
-                                
-                            cost_data = model_data.get('cost', {})
+            # Iterate through all provider sections
+            for provider_id, provider_data in data.items():
+                if not isinstance(provider_data, dict):
+                    continue
+                    
+                # Get provider display name, fallback to ID
+                provider_name = provider_data.get('name', provider_id)
+                models_data = provider_data.get('models', {})
+                
+                if isinstance(models_data, dict):
+                    for model_id, model_data in models_data.items():
+                        if not isinstance(model_data, dict):
+                            continue
                             
-                            # Accept all models, not just Claude
-                            if model_id and cost_data:
-                                input_price = cost_data.get('input')
-                                output_price = cost_data.get('output')
-                                cache_write_price = cost_data.get('cache_write')
-                                cache_read_price = cost_data.get('cache_read')
-                                
-                                if input_price is not None and output_price is not None:
-                                    pricing[model_id] = {
-                                        'input': input_price,
-                                        'output': output_price,
-                                        'cache_write': cache_write_price if cache_write_price is not None else 0,
-                                        'cache_read': cache_read_price if cache_read_price is not None else 0,
-                                    }
+                        cost_data = model_data.get('cost', {})
+                        
+                        if model_id and cost_data:
+                            input_price = cost_data.get('input')
+                            output_price = cost_data.get('output')
+                            cache_write_price = cost_data.get('cache_write')
+                            cache_read_price = cost_data.get('cache_read')
+                            
+                            if input_price is not None and output_price is not None:
+                                pricing[model_id] = {
+                                    'input': input_price,
+                                    'output': output_price,
+                                    'cache_write': cache_write_price if cache_write_price is not None else 0,
+                                    'cache_read': cache_read_price if cache_read_price is not None else 0,
+                                    'provider_id': provider_id,
+                                    'provider_name': provider_name,
+                                }
             
             if pricing and not self._quiet:
                 print(f"Fetched pricing for {len(pricing)} models from API")
@@ -100,6 +102,35 @@ class ModelsDotDev:
         except Exception as e:
             raise RuntimeError(f"Failed to fetch pricing from models.dev API: {e}")
     
+    def get_providers_and_models(self) -> Dict:
+        """Get organized provider and model data from models.dev API."""
+        pricing_data = self.get_pricing()
+        
+        # Organize by provider
+        providers = {}
+        for model_id, model_info in pricing_data.items():
+            provider_id = model_info['provider_id']
+            provider_name = model_info['provider_name']
+            
+            if provider_id not in providers:
+                providers[provider_id] = {
+                    'name': provider_name,
+                    'models': [],
+                    'count': 0
+                }
+            
+            providers[provider_id]['models'].append({
+                'id': model_id,
+                'pricing': {
+                    'input': model_info['input'],
+                    'output': model_info['output'],
+                    'cache_read': model_info['cache_read'],
+                    'cache_write': model_info['cache_write'],
+                }
+            })
+            providers[provider_id]['count'] += 1
+        
+        return providers
 
 
 class ClaudeUsageAnalyzer:
@@ -654,59 +685,33 @@ class OpenCodeUsageAnalyzer:
 def list_providers():
     """List all available providers from the models.dev API."""
     try:
-        # Create a temporary ModelsDotDev instance to fetch pricing data
+        # Create a temporary ModelsDotDev instance to fetch provider data
         models_api = ModelsDotDev(quiet=True)
-        pricing_data = models_api.get_pricing()
+        providers = models_api.get_providers_and_models()
         
-        if not pricing_data:
-            print("❌ Unable to fetch model data from models.dev API")
+        if not providers:
+            print("❌ Unable to fetch provider data from models.dev API")
             return 1
         
-        # Organize models by provider to count them
-        providers = {
-            'anthropic': {'count': 0, 'emoji': '🟣', 'description': 'Claude models (Haiku, Sonnet, Opus)'},
-            'openai': {'count': 0, 'emoji': '🔵', 'description': 'GPT models and o1 reasoning models'},
-            'groq': {'count': 0, 'emoji': '⚡', 'description': 'Fast inference (Llama, Mixtral, Gemma)'},
-            'google': {'count': 0, 'emoji': '🔴', 'description': 'Gemini models'},
-            'mistral': {'count': 0, 'emoji': '🟠', 'description': 'Mistral AI models'},
-            'other': {'count': 0, 'emoji': '🔬', 'description': 'Other providers and models'}
-        }
-        
-        # Count models by provider
-        for model_name in pricing_data.keys():
-            model_lower = model_name.lower()
-            
-            if 'claude' in model_lower:
-                providers['anthropic']['count'] += 1
-            elif 'gpt' in model_lower or 'o1' in model_lower:
-                providers['openai']['count'] += 1
-            elif 'llama' in model_lower or 'mixtral' in model_lower or 'gemma' in model_lower:
-                providers['groq']['count'] += 1
-            elif 'gemini' in model_lower:
-                providers['google']['count'] += 1
-            elif 'mistral' in model_lower or 'codestral' in model_lower or 'devstral' in model_lower or 'ministral' in model_lower:
-                providers['mistral']['count'] += 1
-            else:
-                providers['other']['count'] += 1
-        
         print("🌐 Available AI Providers")
-        print("=" * 40)
+        print("=" * 60)
         
-        # Display providers with counts
-        for provider_name, provider_data in providers.items():
+        # Sort providers by model count (descending)
+        sorted_providers = sorted(providers.items(), key=lambda x: x[1]['count'], reverse=True)
+        
+        for provider_id, provider_data in sorted_providers:
             count = provider_data['count']
-            if count > 0:
-                emoji = provider_data['emoji']
-                description = provider_data['description']
-                print(f"{emoji} {provider_name:<12} {count:3d} models - {description}")
+            name = provider_data['name']
+            print(f"  {provider_id:<15} {count:3d} models - {name}")
         
         print(f"\n💡 Usage:")
         print(f"  uv run main.py --list-models <provider>")
         print(f"  uv run main.py --compare-model <provider/model-name>")
         print(f"\n📊 Examples:")
-        print(f"  uv run main.py --list-models anthropic")
-        print(f"  uv run main.py --list-models openai") 
-        print(f"  uv run main.py --list-models groq")
+        # Show top 3 providers as examples
+        top_providers = [provider_id for provider_id, _ in sorted_providers[:3]]
+        for provider_id in top_providers:
+            print(f"  uv run main.py --list-models {provider_id}")
         print()
         
         return 0
@@ -726,58 +731,13 @@ def list_available_models(provider=None):
         return 1
         
     try:
-        # Create a temporary ModelsDotDev instance to fetch pricing data
+        # Create a temporary ModelsDotDev instance to fetch provider data
         models_api = ModelsDotDev(quiet=True)
-        pricing_data = models_api.get_pricing()
+        providers = models_api.get_providers_and_models()
         
-        if not pricing_data:
-            print("❌ Unable to fetch model data from models.dev API")
+        if not providers:
+            print("❌ Unable to fetch provider data from models.dev API")
             return 1
-        
-        # Organize models by provider and add provider prefixes
-        providers = {
-            'anthropic': {'models': [], 'emoji': '🟣', 'description': 'Claude models (Haiku, Sonnet, Opus)'},
-            'openai': {'models': [], 'emoji': '🔵', 'description': 'GPT models and o1 reasoning models'},
-            'groq': {'models': [], 'emoji': '⚡', 'description': 'Fast inference (Llama, Mixtral, Gemma)'},
-            'google': {'models': [], 'emoji': '🔴', 'description': 'Gemini models'},
-            'mistral': {'models': [], 'emoji': '🟠', 'description': 'Mistral AI models'},
-            'other': {'models': [], 'emoji': '🔬', 'description': 'Other providers and models'}
-        }
-        
-        for model_name in sorted(pricing_data.keys()):
-            pricing = pricing_data[model_name]
-            model_lower = model_name.lower()
-            
-            # Determine provider and add prefix
-            provider_prefix = None
-            if 'claude' in model_lower:
-                provider_prefix = 'anthropic'
-                providers['anthropic']['models'].append((f"anthropic/{model_name}", pricing))
-            elif 'gpt' in model_lower or 'o1' in model_lower:
-                if 'oss' in model_lower:
-                    provider_prefix = 'openai'  # GPT-OSS models
-                    providers['openai']['models'].append((f"openai/{model_name}", pricing))
-                else:
-                    provider_prefix = 'openai'
-                    providers['openai']['models'].append((f"openai/{model_name}", pricing))
-            elif 'llama' in model_lower:
-                provider_prefix = 'groq'
-                providers['groq']['models'].append((f"groq/{model_name}", pricing))
-            elif 'mixtral' in model_lower:
-                provider_prefix = 'groq'
-                providers['groq']['models'].append((f"groq/{model_name}", pricing))
-            elif 'gemma' in model_lower:
-                provider_prefix = 'groq'
-                providers['groq']['models'].append((f"groq/{model_name}", pricing))
-            elif 'gemini' in model_lower:
-                provider_prefix = 'google'
-                providers['google']['models'].append((f"google/{model_name}", pricing))
-            elif 'mistral' in model_lower or 'codestral' in model_lower or 'devstral' in model_lower or 'ministral' in model_lower:
-                provider_prefix = 'mistral'
-                providers['mistral']['models'].append((f"mistral/{model_name}", pricing))
-            else:
-                provider_prefix = 'other'
-                providers['other']['models'].append((f"other/{model_name}", pricing))
         
         # Validate provider argument
         if provider not in providers:
@@ -785,34 +745,41 @@ def list_available_models(provider=None):
             print(f"💡 Use --list-providers to see available providers")
             return 1
             
-        # Get models for the specified provider
-        provider_models = providers[provider]['models']
-        if not provider_models:
+        # Get provider data
+        provider_data = providers[provider]
+        models = provider_data['models']
+        provider_name = provider_data['name']
+        
+        if not models:
             print(f"❌ No models found for provider: {provider}")
             return 1
-            
-        emoji = providers[provider]['emoji']
-        description = providers[provider]['description']
         
-        print(f"{emoji} {provider.upper()} Models ({len(provider_models)} total)")
-        print(f"{description}")
-        print("=" * 60)
+        print(f"🤖 {provider.upper()} Models ({len(models)} total)")
+        print(f"{provider_name}")
+        print("=" * 70)
         
         # Display models for the specified provider
-        for model_with_prefix, pricing in provider_models:
+        for model in models:
+            model_id = model['id']
+            pricing = model['pricing']
+            
+            # Format with provider prefix for consistency
+            model_with_prefix = f"{provider}/{model_id}"
+            
             # Compact pricing format
             price_str = f"${pricing['input']:.3f}→${pricing['output']:.3f}/M"
             if pricing.get('cache_read', 0) > 0 or pricing.get('cache_write', 0) > 0:
                 price_str += f" (cache: ${pricing.get('cache_read', 0):.3f}→${pricing.get('cache_write', 0):.3f})"
             
-            print(f"  {model_with_prefix:<45} {price_str}")
+            print(f"  {model_with_prefix:<50} {price_str}")
         
         print(f"\n💡 Usage: uv run main.py --compare-model <model-name>")
         print(f"📊 Examples for {provider} models:")
         
         # Show a few example models for comparison
-        example_models = provider_models[:3]  # First 3 models as examples
-        for model_with_prefix, _ in example_models:
+        example_models = models[:3]  # First 3 models as examples
+        for model in example_models:
+            model_with_prefix = f"{provider}/{model['id']}"
             print(f"  uv run main.py --compare-model {model_with_prefix}")
         print()
         
