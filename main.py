@@ -331,10 +331,11 @@ class ClaudeUsageAnalyzer:
             model_usage[model].cache_read_input_tokens += usage.cache_read_input_tokens
             
             # Group by project
-            project_usage[summary.project_path].input_tokens += usage.input_tokens
-            project_usage[summary.project_path].output_tokens += usage.output_tokens
-            project_usage[summary.project_path].cache_creation_input_tokens += usage.cache_creation_input_tokens
-            project_usage[summary.project_path].cache_read_input_tokens += usage.cache_read_input_tokens
+            project_name = os.path.basename(summary.project_path)
+            project_usage[project_name].input_tokens += usage.input_tokens
+            project_usage[project_name].output_tokens += usage.output_tokens
+            project_usage[project_name].cache_creation_input_tokens += usage.cache_creation_input_tokens
+            project_usage[project_name].cache_read_input_tokens += usage.cache_read_input_tokens
             
             # Calculate costs
             session_cost = self.calculate_cost(usage, summary.model or 'anthropic/claude-sonnet-4-20250514')
@@ -476,7 +477,7 @@ class ClaudeUsageAnalyzer:
                                       session.token_usage.cache_read_input_tokens)
                 cost = self.calculate_cost(session.token_usage, session.model or 'anthropic/claude-sonnet-4-20250514')
                 time_str = session.start_time.strftime('%Y-%m-%d %H:%M') if session.start_time else 'Unknown'
-                print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${cost:.2f})")
+                print(f"  {time_str} - {os.path.basename(session.project_path)}: {total_session_tokens:,} tokens (${cost:.2f})")
 
 
 class OpenCodeUsageAnalyzer:
@@ -677,10 +678,11 @@ class OpenCodeUsageAnalyzer:
             provider_costs[provider] += session_cost
             
             # Group by project
-            project_usage[summary.project_path].input_tokens += usage.input_tokens
-            project_usage[summary.project_path].output_tokens += usage.output_tokens
-            project_usage[summary.project_path].cache_creation_input_tokens += usage.cache_creation_input_tokens
-            project_usage[summary.project_path].cache_read_input_tokens += usage.cache_read_input_tokens
+            project_name = os.path.basename(summary.project_path)
+            project_usage[project_name].input_tokens += usage.input_tokens
+            project_usage[project_name].output_tokens += usage.output_tokens
+            project_usage[project_name].cache_creation_input_tokens += usage.cache_creation_input_tokens
+            project_usage[project_name].cache_read_input_tokens += usage.cache_read_input_tokens
         
         # Print results
         print("\n" + "=" * 80)
@@ -783,7 +785,7 @@ class OpenCodeUsageAnalyzer:
                                       session.token_usage.cache_read_input_tokens)
                 cost = self.calculate_cost(session.token_usage, session.model or 'claude-sonnet-4-20250514')
                 time_str = session.start_time.strftime('%Y-%m-%d %H:%M') if session.start_time else 'Unknown'
-                print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${cost:.4f})")
+                print(f"  {time_str} - {os.path.basename(session.project_path)}: {total_session_tokens:,} tokens (${cost:.4f})")
 
 
 def list_providers():
@@ -996,9 +998,7 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
     
     # Clean project names
     def clean_project_name(project_path):
-        if project_path.startswith('-home-'):
-            return project_path.replace('-home-goniz-dev-', '').replace('-home-goniz-', '').replace('-root-', '')
-        return project_path
+        return os.path.basename(project_path)
     
     # Print clean summary
     print(f"\n📊 AI Usage Summary")
