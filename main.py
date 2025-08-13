@@ -44,23 +44,19 @@ class SessionSummary:
             self.token_usage = TokenUsage()
 
 
-class ClaudeUsageAnalyzer:
+class ModelsDotDev:
+    """Handles interaction with models.dev API for pricing data."""
+    
     # Models.dev API endpoint
-    MODELS_API_URL = "https://models.dev/api.json"
+    API_URL = "https://models.dev/api.json"
     
-    def __init__(self, claude_dir: str = None, quiet: bool = False):
-        self.claude_dir = claude_dir or os.path.expanduser('~/.claude')
-        self.projects_dir = os.path.join(self.claude_dir, 'projects')
-        self._pricing_cache = None
-        self._cache_timestamp = None
-        self._cache_ttl = 3600  # 1 hour cache TTL
+    def __init__(self, quiet: bool = False):
         self._quiet = quiet
-        self._recent_count = 10
     
-    def _fetch_pricing_from_api(self) -> Dict:
-        """Fetch pricing data from models.dev API."""
+    def get_pricing(self) -> Dict:
+        """Get pricing data from models.dev API."""
         try:
-            response = requests.get(self.MODELS_API_URL, timeout=10)
+            response = requests.get(self.API_URL, timeout=10)
             response.raise_for_status()
             data = response.json()
             
@@ -104,36 +100,16 @@ class ClaudeUsageAnalyzer:
         except Exception as e:
             raise RuntimeError(f"Failed to fetch pricing from models.dev API: {e}")
     
-    def _get_pricing(self) -> Dict:
-        """Get pricing data with caching."""
-        current_time = time.time()
-        
-        # Check if cache is valid
-        if (self._pricing_cache is not None and 
-            self._cache_timestamp is not None and 
-            current_time - self._cache_timestamp < self._cache_ttl):
-            return self._pricing_cache
-        
-        # Fetch fresh pricing data (required)
-        try:
-            api_pricing = self._fetch_pricing_from_api()
-            if not api_pricing:
-                raise RuntimeError("No models found in API response")
-                
-            self._pricing_cache = api_pricing
-            self._cache_timestamp = current_time
-            if not self._quiet:
-                print(f"Using pricing data from models.dev API ({len(api_pricing)} models)")
-            return self._pricing_cache
-            
-        except Exception as e:
-            if self._pricing_cache is not None:
-                if not self._quiet:
-                    print(f"Warning: Failed to refresh pricing data, using cached data: {e}")
-                return self._pricing_cache
-            else:
-                raise RuntimeError(f"Failed to fetch initial pricing data: {e}")
-        
+
+
+class ClaudeUsageAnalyzer:
+    def __init__(self, claude_dir: str = None, quiet: bool = False):
+        self.claude_dir = claude_dir or os.path.expanduser('~/.claude')
+        self.projects_dir = os.path.join(self.claude_dir, 'projects')
+        self._quiet = quiet
+        self._recent_count = 10
+        self.models_api = ModelsDotDev(quiet=quiet)
+    
     def find_session_files(self) -> List[str]:
         """Find all .jsonl session files in the projects directory."""
         pattern = os.path.join(self.projects_dir, '**', '*.jsonl')
@@ -197,7 +173,7 @@ class ClaudeUsageAnalyzer:
     
     def calculate_cost(self, token_usage: TokenUsage, model: str) -> float:
         """Calculate estimated cost based on token usage and model."""
-        pricing_data = self._get_pricing()
+        pricing_data = self.models_api.get_pricing()
         
         # Extract model name without provider prefix for pricing lookup
         model_for_pricing = model
@@ -675,117 +651,169 @@ class OpenCodeUsageAnalyzer:
                 print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${session.cost:.4f})")
 
 
-def list_available_models():
-    """List all available models from the models.dev API in a clean format."""
+def list_providers():
+    """List all available providers from the models.dev API."""
     try:
-        # Create a temporary analyzer just to fetch pricing data
-        temp_analyzer = ClaudeUsageAnalyzer(quiet=True)
-        pricing_data = temp_analyzer._get_pricing()
+        # Create a temporary ModelsDotDev instance to fetch pricing data
+        models_api = ModelsDotDev(quiet=True)
+        pricing_data = models_api.get_pricing()
         
         if not pricing_data:
             print("❌ Unable to fetch model data from models.dev API")
             return 1
         
-        # Group models by provider/family for better organization
-        claude_models = []
-        openai_models = []
-        groq_models = []
-        anthropic_models = []
-        other_models = []
+        # Organize models by provider to count them
+        providers = {
+            'anthropic': {'count': 0, 'emoji': '🟣', 'description': 'Claude models (Haiku, Sonnet, Opus)'},
+            'openai': {'count': 0, 'emoji': '🔵', 'description': 'GPT models and o1 reasoning models'},
+            'groq': {'count': 0, 'emoji': '⚡', 'description': 'Fast inference (Llama, Mixtral, Gemma)'},
+            'google': {'count': 0, 'emoji': '🔴', 'description': 'Gemini models'},
+            'mistral': {'count': 0, 'emoji': '🟠', 'description': 'Mistral AI models'},
+            'other': {'count': 0, 'emoji': '🔬', 'description': 'Other providers and models'}
+        }
+        
+        # Count models by provider
+        for model_name in pricing_data.keys():
+            model_lower = model_name.lower()
+            
+            if 'claude' in model_lower:
+                providers['anthropic']['count'] += 1
+            elif 'gpt' in model_lower or 'o1' in model_lower:
+                providers['openai']['count'] += 1
+            elif 'llama' in model_lower or 'mixtral' in model_lower or 'gemma' in model_lower:
+                providers['groq']['count'] += 1
+            elif 'gemini' in model_lower:
+                providers['google']['count'] += 1
+            elif 'mistral' in model_lower or 'codestral' in model_lower or 'devstral' in model_lower or 'ministral' in model_lower:
+                providers['mistral']['count'] += 1
+            else:
+                providers['other']['count'] += 1
+        
+        print("🌐 Available AI Providers")
+        print("=" * 40)
+        
+        # Display providers with counts
+        for provider_name, provider_data in providers.items():
+            count = provider_data['count']
+            if count > 0:
+                emoji = provider_data['emoji']
+                description = provider_data['description']
+                print(f"{emoji} {provider_name:<12} {count:3d} models - {description}")
+        
+        print(f"\n💡 Usage:")
+        print(f"  uv run main.py --list-models <provider>")
+        print(f"  uv run main.py --compare-model <provider/model-name>")
+        print(f"\n📊 Examples:")
+        print(f"  uv run main.py --list-models anthropic")
+        print(f"  uv run main.py --list-models openai") 
+        print(f"  uv run main.py --list-models groq")
+        print()
+        
+        return 0
+        
+    except Exception as e:
+        print(f"❌ Error fetching provider data: {e}")
+        print("💡 Make sure you have internet connectivity to access models.dev API")
+        return 1
+
+
+def list_available_models(provider=None):
+    """List models for a specific provider from the models.dev API."""
+    if not provider:
+        print("❌ Provider argument is required")
+        print("💡 Use --list-providers to see available providers")
+        print("📊 Example: uv run main.py --list-models anthropic")
+        return 1
+        
+    try:
+        # Create a temporary ModelsDotDev instance to fetch pricing data
+        models_api = ModelsDotDev(quiet=True)
+        pricing_data = models_api.get_pricing()
+        
+        if not pricing_data:
+            print("❌ Unable to fetch model data from models.dev API")
+            return 1
+        
+        # Organize models by provider and add provider prefixes
+        providers = {
+            'anthropic': {'models': [], 'emoji': '🟣', 'description': 'Claude models (Haiku, Sonnet, Opus)'},
+            'openai': {'models': [], 'emoji': '🔵', 'description': 'GPT models and o1 reasoning models'},
+            'groq': {'models': [], 'emoji': '⚡', 'description': 'Fast inference (Llama, Mixtral, Gemma)'},
+            'google': {'models': [], 'emoji': '🔴', 'description': 'Gemini models'},
+            'mistral': {'models': [], 'emoji': '🟠', 'description': 'Mistral AI models'},
+            'other': {'models': [], 'emoji': '🔬', 'description': 'Other providers and models'}
+        }
         
         for model_name in sorted(pricing_data.keys()):
             pricing = pricing_data[model_name]
             model_lower = model_name.lower()
             
+            # Determine provider and add prefix
+            provider_prefix = None
             if 'claude' in model_lower:
-                claude_models.append((model_name, pricing))
-            elif 'gpt' in model_lower or 'openai' in model_lower or 'o1' in model_lower:
-                openai_models.append((model_name, pricing))
-            elif 'groq' in model_lower or 'llama' in model_lower or 'mixtral' in model_lower or 'gemma' in model_lower:
-                groq_models.append((model_name, pricing))
-            elif 'anthropic' in model_lower:
-                anthropic_models.append((model_name, pricing))
+                provider_prefix = 'anthropic'
+                providers['anthropic']['models'].append((f"anthropic/{model_name}", pricing))
+            elif 'gpt' in model_lower or 'o1' in model_lower:
+                if 'oss' in model_lower:
+                    provider_prefix = 'openai'  # GPT-OSS models
+                    providers['openai']['models'].append((f"openai/{model_name}", pricing))
+                else:
+                    provider_prefix = 'openai'
+                    providers['openai']['models'].append((f"openai/{model_name}", pricing))
+            elif 'llama' in model_lower:
+                provider_prefix = 'groq'
+                providers['groq']['models'].append((f"groq/{model_name}", pricing))
+            elif 'mixtral' in model_lower:
+                provider_prefix = 'groq'
+                providers['groq']['models'].append((f"groq/{model_name}", pricing))
+            elif 'gemma' in model_lower:
+                provider_prefix = 'groq'
+                providers['groq']['models'].append((f"groq/{model_name}", pricing))
+            elif 'gemini' in model_lower:
+                provider_prefix = 'google'
+                providers['google']['models'].append((f"google/{model_name}", pricing))
+            elif 'mistral' in model_lower or 'codestral' in model_lower or 'devstral' in model_lower or 'ministral' in model_lower:
+                provider_prefix = 'mistral'
+                providers['mistral']['models'].append((f"mistral/{model_name}", pricing))
             else:
-                other_models.append((model_name, pricing))
+                provider_prefix = 'other'
+                providers['other']['models'].append((f"other/{model_name}", pricing))
         
-        print("🤖 Available Models for Cost Comparison")
-        print("=" * 70)
-        print(f"Found {len(pricing_data)} models from models.dev API")
+        # Validate provider argument
+        if provider not in providers:
+            print(f"❌ Unknown provider: {provider}")
+            print(f"💡 Use --list-providers to see available providers")
+            return 1
+            
+        # Get models for the specified provider
+        provider_models = providers[provider]['models']
+        if not provider_models:
+            print(f"❌ No models found for provider: {provider}")
+            return 1
+            
+        emoji = providers[provider]['emoji']
+        description = providers[provider]['description']
         
-        def format_pricing(pricing):
-            """Format pricing info, handling missing cache pricing for non-Claude models."""
-            base = f"Input: ${pricing['input']:.3f}/M, Output: ${pricing['output']:.3f}/M"
-            if 'cache_read' in pricing and 'cache_write' in pricing:
-                if pricing['cache_read'] > 0 or pricing['cache_write'] > 0:
-                    base += f", Cache: ${pricing['cache_read']:.3f}/M read, ${pricing['cache_write']:.3f}/M write"
-            return base
+        print(f"{emoji} {provider.upper()} Models ({len(provider_models)} total)")
+        print(f"{description}")
+        print("=" * 60)
         
-        if claude_models:
-            print("\n🟣 Claude Models:")
-            for model_name, pricing in claude_models:
-                # Clean up model names for display
-                display_name = model_name
-                if 'haiku' in model_name.lower():
-                    display_name += " (Fastest, Most Cost-Effective)"
-                elif 'sonnet' in model_name.lower():
-                    if '3-5' in model_name:
-                        display_name += " (Balanced Performance)"
-                    elif '4' in model_name:
-                        display_name += " (Most Capable)"
-                elif 'opus' in model_name.lower():
-                    display_name += " (Most Intelligent)"
-                
-                print(f"  • {display_name}")
-                print(f"    {format_pricing(pricing)}")
+        # Display models for the specified provider
+        for model_with_prefix, pricing in provider_models:
+            # Compact pricing format
+            price_str = f"${pricing['input']:.3f}→${pricing['output']:.3f}/M"
+            if pricing.get('cache_read', 0) > 0 or pricing.get('cache_write', 0) > 0:
+                price_str += f" (cache: ${pricing.get('cache_read', 0):.3f}→${pricing.get('cache_write', 0):.3f})"
+            
+            print(f"  {model_with_prefix:<45} {price_str}")
         
-        if openai_models:
-            print(f"\n🔵 OpenAI Models:")
-            for model_name, pricing in openai_models:
-                display_name = model_name
-                if 'gpt-4o' in model_name.lower():
-                    display_name += " (GPT-4 Omni)"
-                elif 'gpt-4' in model_name.lower():
-                    display_name += " (GPT-4)"
-                elif 'gpt-3.5' in model_name.lower():
-                    display_name += " (GPT-3.5)"
-                elif 'o1' in model_name.lower():
-                    display_name += " (Reasoning Model)"
-                
-                print(f"  • {display_name}")
-                print(f"    {format_pricing(pricing)}")
+        print(f"\n💡 Usage: uv run main.py --compare-model <model-name>")
+        print(f"📊 Examples for {provider} models:")
         
-        if groq_models:
-            print(f"\n⚡ Groq Models:")
-            for model_name, pricing in groq_models:
-                display_name = model_name
-                if 'llama' in model_name.lower():
-                    display_name += " (Meta Llama)"
-                elif 'mixtral' in model_name.lower():
-                    display_name += " (Mistral Mixtral)"
-                elif 'gemma' in model_name.lower():
-                    display_name += " (Google Gemma)"
-                
-                print(f"  • {display_name}")
-                print(f"    {format_pricing(pricing)}")
-        
-        if anthropic_models:
-            print(f"\n🤖 Anthropic Models:")
-            for model_name, pricing in anthropic_models:
-                print(f"  • {model_name}")
-                print(f"    {format_pricing(pricing)}")
-        
-        if other_models:
-            print(f"\n🔬 Other Models:")
-            for model_name, pricing in other_models:
-                print(f"  • {model_name}")
-                print(f"    {format_pricing(pricing)}")
-        
-        print(f"\n💡 Usage: python main.py --compare-model <model-name>")
-        print(f"📊 Examples:")
-        print(f"   python main.py --compare-model claude-3-5-haiku-20241022  # Claude model")
-        print(f"   python main.py --compare-model gpt-5                       # OpenAI GPT-5")
-        print(f"   python main.py --compare-model llama-3.3-70b               # Groq Llama")
-        print(f"   python main.py --compare-model openai/gpt-oss-20b          # GPT-OSS")
+        # Show a few example models for comparison
+        example_models = provider_models[:3]  # First 3 models as examples
+        for model_with_prefix, _ in example_models:
+            print(f"  uv run main.py --compare-model {model_with_prefix}")
         print()
         
         return 0
@@ -803,7 +831,7 @@ def calculate_alternative_model_cost(summaries: List[SessionSummary], alternativ
     
     try:
         # Check if the specific model is available in pricing data
-        pricing_data = claude_analyzer._get_pricing()
+        pricing_data = claude_analyzer.models_api.get_pricing()
         
         # Extract model name without provider prefix for pricing lookup
         model_for_pricing = alternative_model
@@ -1088,8 +1116,9 @@ Examples:
   %(prog)s --recent 5                   # Show only last 5 recent sessions
   %(prog)s --project my-project         # Filter by specific project
   %(prog)s --model claude-sonnet-4      # Filter by specific model
-  %(prog)s --compare-model claude-3-5-haiku-20241022  # Compare costs with alternative model
-  %(prog)s --list-models                # List all available models and exit
+  %(prog)s --compare-model anthropic/claude-3-5-haiku-20241022  # Compare costs with alternative model
+  %(prog)s --list-providers             # List all available providers
+  %(prog)s --list-models anthropic      # List all models for anthropic provider
         """
     )
     
@@ -1166,9 +1195,16 @@ Examples:
     )
     
     parser.add_argument(
-        '--list-models',
+        '--list-providers',
         action='store_true',
-        help='List all available models from models.dev API and exit'
+        help='List all available providers from models.dev API and exit'
+    )
+    
+    parser.add_argument(
+        '--list-models',
+        type=str,
+        metavar='PROVIDER',
+        help='List models for a specific provider (e.g., anthropic, openai, groq) and exit'
     )
     
     return parser
@@ -1178,9 +1214,13 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
     
+    # Handle list-providers flag and exit early
+    if args.list_providers:
+        return list_providers()
+    
     # Handle list-models flag and exit early
     if args.list_models:
-        return list_available_models()
+        return list_available_models(args.list_models)
     
     # Validate mutually exclusive options
     if args.claude_only and args.opencode_only:
@@ -1198,10 +1238,7 @@ def main():
                 claude_quiet = args.quiet or not args.verbose
                 claude_analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=claude_quiet)
                 
-                # Force cache refresh if requested
-                if args.no_cache:
-                    claude_analyzer._pricing_cache = None
-                    claude_analyzer._cache_timestamp = None
+                # Note: --no-cache flag is no longer needed as caching was removed
                 
                 if os.path.exists(claude_analyzer.projects_dir):
                     claude_summaries = claude_analyzer.analyze_all_sessions()
