@@ -67,10 +67,10 @@ class ClaudeUsageAnalyzer:
             # Transform API data to our pricing format
             pricing = {}
             
-            # Check multiple possible sections for Claude models
-            sections_to_check = ['anthropic', 'google-vertex-anthropic']
+            # Check all possible sections for all models
+            all_sections = data.keys() if isinstance(data, dict) else []
             
-            for section_name in sections_to_check:
+            for section_name in all_sections:
                 section_data = data.get(section_name, {})
                 if section_data and isinstance(section_data, dict):
                     # Check if there's a 'models' key containing the actual model data
@@ -82,7 +82,8 @@ class ClaudeUsageAnalyzer:
                                 
                             cost_data = model_data.get('cost', {})
                             
-                            if model_id and 'claude' in model_id.lower() and cost_data:
+                            # Accept all models, not just Claude
+                            if model_id and cost_data:
                                 input_price = cost_data.get('input')
                                 output_price = cost_data.get('output')
                                 cache_write_price = cost_data.get('cache_write')
@@ -92,12 +93,12 @@ class ClaudeUsageAnalyzer:
                                     pricing[model_id] = {
                                         'input': input_price,
                                         'output': output_price,
-                                        'cache_write': cache_write_price or input_price * 1.25,
-                                        'cache_read': cache_read_price or input_price * 0.1,
+                                        'cache_write': cache_write_price if cache_write_price is not None else 0,
+                                        'cache_read': cache_read_price if cache_read_price is not None else 0,
                                     }
             
             if pricing and not self._quiet:
-                print(f"Fetched pricing for {len(pricing)} Claude models from API")
+                print(f"Fetched pricing for {len(pricing)} models from API")
             return pricing
             
         except Exception as e:
@@ -117,7 +118,7 @@ class ClaudeUsageAnalyzer:
         try:
             api_pricing = self._fetch_pricing_from_api()
             if not api_pricing:
-                raise RuntimeError("No Claude models found in API response")
+                raise RuntimeError("No models found in API response")
                 
             self._pricing_cache = api_pricing
             self._cache_timestamp = current_time
@@ -181,7 +182,9 @@ class ClaudeUsageAnalyzer:
                             
                             # Extract model information
                             if 'model' in data['message'] and not summary.model:
-                                summary.model = data['message']['model']
+                                model_name = data['message']['model']
+                                # Add provider prefix for Claude Code models (always Anthropic)
+                                summary.model = f"anthropic/{model_name}"
                                 
                     except json.JSONDecodeError as e:
                         print(f"Warning: Invalid JSON in {filepath} line {line_num}: {e}")
@@ -196,7 +199,12 @@ class ClaudeUsageAnalyzer:
         """Calculate estimated cost based on token usage and model."""
         pricing_data = self._get_pricing()
         
-        pricing = pricing_data.get(model)
+        # Extract model name without provider prefix for pricing lookup
+        model_for_pricing = model
+        if '/' in model:
+            model_for_pricing = model.split('/', 1)[1]
+        
+        pricing = pricing_data.get(model_for_pricing)
         
         if pricing is None:
             # Try to find a default Claude model for fallback
@@ -279,7 +287,7 @@ class ClaudeUsageAnalyzer:
             project_usage[summary.project_path].cache_read_input_tokens += usage.cache_read_input_tokens
             
             # Calculate costs
-            session_cost = self.calculate_cost(usage, summary.model or 'claude-sonnet-4-20250514')
+            session_cost = self.calculate_cost(usage, summary.model or 'anthropic/claude-sonnet-4-20250514')
             total_cost += session_cost
             model_costs[model] += session_cost
         
@@ -333,7 +341,7 @@ class ClaudeUsageAnalyzer:
                 if summary.start_time:
                     date_key = summary.start_time.date()
                     month_key = summary.start_time.strftime('%Y-%m')
-                    session_cost = self.calculate_cost(summary.token_usage, summary.model or 'claude-sonnet-4-20250514')
+                    session_cost = self.calculate_cost(summary.token_usage, summary.model or 'anthropic/claude-sonnet-4-20250514')
                     daily_costs[date_key] += session_cost
                     monthly_costs[month_key] += session_cost
             
@@ -392,7 +400,7 @@ class ClaudeUsageAnalyzer:
                                       session.token_usage.output_tokens + 
                                       session.token_usage.cache_creation_input_tokens + 
                                       session.token_usage.cache_read_input_tokens)
-                cost = self.calculate_cost(session.token_usage, session.model or 'claude-sonnet-4-20250514')
+                cost = self.calculate_cost(session.token_usage, session.model or 'anthropic/claude-sonnet-4-20250514')
                 time_str = session.start_time.strftime('%Y-%m-%d %H:%M') if session.start_time else 'Unknown'
                 print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${cost:.2f})")
 
@@ -483,7 +491,10 @@ class OpenCodeUsageAnalyzer:
                                 
                                 # Extract model and provider information
                                 if 'modelID' in msg_data and not summary.model:
-                                    summary.model = msg_data['modelID']
+                                    model_name = msg_data['modelID']
+                                    provider_name = msg_data.get('providerID', 'unknown')
+                                    # Format with provider prefix
+                                    summary.model = f"{provider_name}/{model_name}"
                                 if 'providerID' in msg_data and not summary.provider:
                                     summary.provider = msg_data['providerID']
                                 
@@ -664,7 +675,177 @@ class OpenCodeUsageAnalyzer:
                 print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${session.cost:.4f})")
 
 
-def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 10, claude_analyzer=None):
+def list_available_models():
+    """List all available models from the models.dev API in a clean format."""
+    try:
+        # Create a temporary analyzer just to fetch pricing data
+        temp_analyzer = ClaudeUsageAnalyzer(quiet=True)
+        pricing_data = temp_analyzer._get_pricing()
+        
+        if not pricing_data:
+            print("❌ Unable to fetch model data from models.dev API")
+            return 1
+        
+        # Group models by provider/family for better organization
+        claude_models = []
+        openai_models = []
+        groq_models = []
+        anthropic_models = []
+        other_models = []
+        
+        for model_name in sorted(pricing_data.keys()):
+            pricing = pricing_data[model_name]
+            model_lower = model_name.lower()
+            
+            if 'claude' in model_lower:
+                claude_models.append((model_name, pricing))
+            elif 'gpt' in model_lower or 'openai' in model_lower or 'o1' in model_lower:
+                openai_models.append((model_name, pricing))
+            elif 'groq' in model_lower or 'llama' in model_lower or 'mixtral' in model_lower or 'gemma' in model_lower:
+                groq_models.append((model_name, pricing))
+            elif 'anthropic' in model_lower:
+                anthropic_models.append((model_name, pricing))
+            else:
+                other_models.append((model_name, pricing))
+        
+        print("🤖 Available Models for Cost Comparison")
+        print("=" * 70)
+        print(f"Found {len(pricing_data)} models from models.dev API")
+        
+        def format_pricing(pricing):
+            """Format pricing info, handling missing cache pricing for non-Claude models."""
+            base = f"Input: ${pricing['input']:.3f}/M, Output: ${pricing['output']:.3f}/M"
+            if 'cache_read' in pricing and 'cache_write' in pricing:
+                if pricing['cache_read'] > 0 or pricing['cache_write'] > 0:
+                    base += f", Cache: ${pricing['cache_read']:.3f}/M read, ${pricing['cache_write']:.3f}/M write"
+            return base
+        
+        if claude_models:
+            print("\n🟣 Claude Models:")
+            for model_name, pricing in claude_models:
+                # Clean up model names for display
+                display_name = model_name
+                if 'haiku' in model_name.lower():
+                    display_name += " (Fastest, Most Cost-Effective)"
+                elif 'sonnet' in model_name.lower():
+                    if '3-5' in model_name:
+                        display_name += " (Balanced Performance)"
+                    elif '4' in model_name:
+                        display_name += " (Most Capable)"
+                elif 'opus' in model_name.lower():
+                    display_name += " (Most Intelligent)"
+                
+                print(f"  • {display_name}")
+                print(f"    {format_pricing(pricing)}")
+        
+        if openai_models:
+            print(f"\n🔵 OpenAI Models:")
+            for model_name, pricing in openai_models:
+                display_name = model_name
+                if 'gpt-4o' in model_name.lower():
+                    display_name += " (GPT-4 Omni)"
+                elif 'gpt-4' in model_name.lower():
+                    display_name += " (GPT-4)"
+                elif 'gpt-3.5' in model_name.lower():
+                    display_name += " (GPT-3.5)"
+                elif 'o1' in model_name.lower():
+                    display_name += " (Reasoning Model)"
+                
+                print(f"  • {display_name}")
+                print(f"    {format_pricing(pricing)}")
+        
+        if groq_models:
+            print(f"\n⚡ Groq Models:")
+            for model_name, pricing in groq_models:
+                display_name = model_name
+                if 'llama' in model_name.lower():
+                    display_name += " (Meta Llama)"
+                elif 'mixtral' in model_name.lower():
+                    display_name += " (Mistral Mixtral)"
+                elif 'gemma' in model_name.lower():
+                    display_name += " (Google Gemma)"
+                
+                print(f"  • {display_name}")
+                print(f"    {format_pricing(pricing)}")
+        
+        if anthropic_models:
+            print(f"\n🤖 Anthropic Models:")
+            for model_name, pricing in anthropic_models:
+                print(f"  • {model_name}")
+                print(f"    {format_pricing(pricing)}")
+        
+        if other_models:
+            print(f"\n🔬 Other Models:")
+            for model_name, pricing in other_models:
+                print(f"  • {model_name}")
+                print(f"    {format_pricing(pricing)}")
+        
+        print(f"\n💡 Usage: python main.py --compare-model <model-name>")
+        print(f"📊 Examples:")
+        print(f"   python main.py --compare-model claude-3-5-haiku-20241022  # Claude model")
+        print(f"   python main.py --compare-model gpt-5                       # OpenAI GPT-5")
+        print(f"   python main.py --compare-model llama-3.3-70b               # Groq Llama")
+        print(f"   python main.py --compare-model openai/gpt-oss-20b          # GPT-OSS")
+        print()
+        
+        return 0
+        
+    except Exception as e:
+        print(f"❌ Error fetching model data: {e}")
+        print("💡 Make sure you have internet connectivity to access models.dev API")
+        return 1
+
+
+def calculate_alternative_model_cost(summaries: List[SessionSummary], alternative_model: str, claude_analyzer=None) -> float:
+    """Calculate what the cost would have been using an alternative model (Claude or non-Claude)."""
+    if not claude_analyzer:
+        return 0.0
+    
+    try:
+        # Check if the specific model is available in pricing data
+        pricing_data = claude_analyzer._get_pricing()
+        
+        # Extract model name without provider prefix for pricing lookup
+        model_for_pricing = alternative_model
+        if '/' in alternative_model:
+            model_for_pricing = alternative_model.split('/', 1)[1]
+        
+        if model_for_pricing not in pricing_data:
+            return 0.0  # Model not found
+        
+        # Aggregate total token usage across all sessions
+        total_usage = TokenUsage()
+        for summary in summaries:
+            usage = summary.token_usage
+            total_usage.input_tokens += usage.input_tokens
+            total_usage.output_tokens += usage.output_tokens
+            total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens
+            total_usage.cache_read_input_tokens += usage.cache_read_input_tokens
+        
+        # Calculate cost using the specific model pricing
+        pricing = pricing_data[model_for_pricing]
+        cost = 0.0
+        
+        # Basic input/output tokens (all models have these)
+        cost += (total_usage.input_tokens / 1_000_000) * pricing['input']
+        cost += (total_usage.output_tokens / 1_000_000) * pricing['output']
+        
+        # Cache tokens (only Claude models typically have cache pricing)
+        if 'cache_write' in pricing and 'cache_read' in pricing:
+            cost += (total_usage.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
+            cost += (total_usage.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+        else:
+            # For non-Claude models, treat cache tokens as regular input tokens
+            # since they don't have cache-specific pricing
+            cost += (total_usage.cache_creation_input_tokens / 1_000_000) * pricing['input']
+            cost += (total_usage.cache_read_input_tokens / 1_000_000) * pricing['input']
+        
+        return cost
+    except Exception as e:
+        return 0.0
+
+
+def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 10, claude_analyzer=None, compare_model: str = None):
     """Print a clean, unified summary of both Claude Code and OpenCode sessions."""
     if not summaries:
         print("No session data found.")
@@ -708,7 +889,7 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
                 claude_total_usage.output_tokens += s.token_usage.output_tokens
                 claude_total_usage.cache_creation_input_tokens += s.token_usage.cache_creation_input_tokens
                 claude_total_usage.cache_read_input_tokens += s.token_usage.cache_read_input_tokens
-            claude_cost = claude_analyzer.calculate_cost(claude_total_usage, 'claude-sonnet-4-20250514')
+            claude_cost = claude_analyzer.calculate_cost(claude_total_usage, 'anthropic/claude-sonnet-4-20250514')
         except:
             claude_cost = 0.0
     
@@ -741,6 +922,78 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
         print(f"💰 ${total_cost:.2f} estimated cost")
         if claude_cost > 0 and opencode_cost > 0:
             print(f"   └─ Claude Code: ${claude_cost:.2f}, OpenCode: ${opencode_cost:.4f}")
+        
+        # Cost comparison with alternative model if requested
+        if compare_model and claude_analyzer and claude_summaries:
+            try:
+                alt_cost = calculate_alternative_model_cost(claude_summaries, compare_model, claude_analyzer)
+                alt_total_cost = alt_cost + opencode_cost
+                
+                if alt_cost > 0 and abs(alt_cost - claude_cost) > 0.001:  # Avoid floating point comparison issues
+                    cost_diff = claude_cost - alt_cost
+                    percentage_diff = (cost_diff / claude_cost) * 100 if claude_cost > 0 else 0
+                    
+                    # Clean up model name for display
+                    clean_model_name = compare_model
+                    model_lower = compare_model.lower()
+                    
+                    # Claude models
+                    if 'claude' in model_lower:
+                        if 'haiku' in model_lower:
+                            clean_model_name = 'Claude 3.5 Haiku'
+                        elif 'sonnet' in model_lower:
+                            if '4' in model_lower:
+                                clean_model_name = 'Claude Sonnet 4'
+                            else:
+                                clean_model_name = 'Claude 3.5 Sonnet'
+                        elif 'opus' in model_lower:
+                            clean_model_name = 'Claude 3 Opus'
+                    
+                    # OpenAI models
+                    elif 'gpt' in model_lower or 'o1' in model_lower:
+                        if 'gpt-4o' in model_lower:
+                            clean_model_name = 'GPT-4 Omni'
+                        elif 'gpt-4' in model_lower:
+                            clean_model_name = 'GPT-4'
+                        elif 'gpt-3.5' in model_lower:
+                            clean_model_name = 'GPT-3.5'
+                        elif 'o1-preview' in model_lower:
+                            clean_model_name = 'GPT-o1 Preview'
+                        elif 'o1-mini' in model_lower:
+                            clean_model_name = 'GPT-o1 Mini'
+                    
+                    # Groq models
+                    elif 'llama' in model_lower:
+                        if '70b' in model_lower:
+                            clean_model_name = 'Llama 3 70B (Groq)'
+                        elif '8b' in model_lower:
+                            clean_model_name = 'Llama 3 8B (Groq)'
+                        else:
+                            clean_model_name = 'Llama (Groq)'
+                    elif 'mixtral' in model_lower:
+                        clean_model_name = 'Mixtral 8x7B (Groq)'
+                    elif 'gemma' in model_lower:
+                        clean_model_name = 'Gemma 2 (Groq)'
+                    
+                    # Show comparison with appropriate emoji based on model type
+                    model_emoji = "📊"
+                    if 'gpt' in model_lower or 'o1' in model_lower:
+                        model_emoji = "🔵"
+                    elif 'groq' in model_lower or 'llama' in model_lower or 'mixtral' in model_lower:
+                        model_emoji = "⚡"
+                    elif 'claude' in model_lower:
+                        model_emoji = "🟣"
+                    
+                    if cost_diff > 0:
+                        print(f"{model_emoji} Alternative: {clean_model_name} would cost ${alt_total_cost:.2f} (save ${cost_diff:.2f}, -{percentage_diff:.1f}%)")
+                    elif cost_diff < 0:
+                        print(f"{model_emoji} Alternative: {clean_model_name} would cost ${alt_total_cost:.2f} (cost ${-cost_diff:.2f} more, +{-percentage_diff:.1f}%)")
+                elif alt_cost > 0:
+                    print(f"📊 Alternative: {clean_model_name} would cost ${alt_total_cost:.2f} (same cost)")
+                else:
+                    print(f"⚠️  Could not calculate cost for '{compare_model}' (model not found in pricing data)")
+            except Exception as e:
+                print(f"⚠️  Error comparing with {compare_model}: {str(e)}")
     
     # Token breakdown (simplified)
     if total_tokens.cache_read_input_tokens > 0 or total_tokens.cache_creation_input_tokens > 0:
@@ -835,6 +1088,8 @@ Examples:
   %(prog)s --recent 5                   # Show only last 5 recent sessions
   %(prog)s --project my-project         # Filter by specific project
   %(prog)s --model claude-sonnet-4      # Filter by specific model
+  %(prog)s --compare-model claude-3-5-haiku-20241022  # Compare costs with alternative model
+  %(prog)s --list-models                # List all available models and exit
         """
     )
     
@@ -903,12 +1158,29 @@ Examples:
         help='Show detailed breakdowns for each platform (default: unified summary only)'
     )
     
+    parser.add_argument(
+        '--compare-model',
+        type=str,
+        default=None,
+        help='Compare costs with an alternative model (e.g., claude-3-5-haiku-20241022)'
+    )
+    
+    parser.add_argument(
+        '--list-models',
+        action='store_true',
+        help='List all available models from models.dev API and exit'
+    )
+    
     return parser
 
 
 def main():
     parser = create_parser()
     args = parser.parse_args()
+    
+    # Handle list-models flag and exit early
+    if args.list_models:
+        return list_available_models()
     
     # Validate mutually exclusive options
     if args.claude_only and args.opencode_only:
@@ -989,7 +1261,7 @@ def main():
         if claude_summaries and not args.opencode_only:
             analyzer_for_cost = claude_analyzer
         
-        print_unified_summary(all_summaries, args.recent, analyzer_for_cost)
+        print_unified_summary(all_summaries, args.recent, analyzer_for_cost, args.compare_model)
         
         # Add verbose option for detailed breakdowns if requested
         if hasattr(args, 'verbose') and args.verbose:
