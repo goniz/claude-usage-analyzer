@@ -946,6 +946,199 @@ def calculate_alternative_model_cost(summaries: List[SessionSummary], alternativ
         return 0.0
 
 
+def print_dedicated_comparison_summary(summaries: List[SessionSummary], compare_model: str, claude_analyzer=None):
+    """Print a dedicated comparison summary focusing on cost differences."""
+    if not compare_model or not claude_analyzer:
+        return
+        
+    try:
+        # Calculate current and alternative costs
+        current_cost = sum(claude_analyzer.calculate_cost(summary.token_usage, summary.model or 'anthropic/claude-sonnet-4-20250514') 
+                          for summary in summaries)
+        alt_cost = calculate_alternative_model_cost(summaries, compare_model, claude_analyzer)
+        
+        if alt_cost <= 0:
+            print(f"⚠️  Could not calculate cost for '{compare_model}' (model not found in pricing data)")
+            return
+            
+        # Get time data for projections
+        sessions_with_time = [s for s in summaries if s.start_time]
+        if len(sessions_with_time) >= 2:
+            first_session = min(sessions_with_time, key=lambda s: s.start_time)
+            last_session = max(sessions_with_time, key=lambda s: s.start_time)
+            total_days = (last_session.start_time - first_session.start_time).days + 1
+        else:
+            total_days = 1  # Default to 1 day if we can't calculate time span
+            
+        # Clean up model names
+        current_models = set(s.model or 'claude-sonnet-4-20250514' for s in summaries)
+        clean_compare_name = clean_model_name_for_display(compare_model)
+        
+        # Calculate token usage breakdown
+        total_tokens = TokenUsage()
+        for summary in summaries:
+            usage = summary.token_usage
+            total_tokens.input_tokens += usage.input_tokens
+            total_tokens.output_tokens += usage.output_tokens
+            total_tokens.cache_creation_input_tokens += usage.cache_creation_input_tokens
+            total_tokens.cache_read_input_tokens += usage.cache_read_input_tokens
+            
+        print("\n" + "=" * 80)
+        print(f"📊 MODEL COMPARISON ANALYSIS")
+        print("=" * 80)
+        
+        # Current vs Alternative summary
+        cost_diff = current_cost - alt_cost
+        percentage_diff = (cost_diff / current_cost) * 100 if current_cost > 0 else 0
+        
+        print(f"\n💰 TOTAL COST COMPARISON")
+        print(f"   Current Models: ${current_cost:.4f}")
+        print(f"   {clean_compare_name}: ${alt_cost:.4f}")
+        if abs(cost_diff) > 0.001:
+            if cost_diff > 0:
+                print(f"   💚 Savings: ${cost_diff:.4f} ({percentage_diff:.1f}% less)")
+            else:
+                print(f"   🔴 Additional: ${-cost_diff:.4f} ({-percentage_diff:.1f}% more)")
+        else:
+            print(f"   ⚖️  Same cost")
+            
+        # Time-based projections
+        print(f"\n⏰ COST PROJECTIONS")
+        current_daily = current_cost / total_days
+        alt_daily = alt_cost / total_days
+        
+        print(f"   Current Model(s):")
+        print(f"   ├─ Daily: ${current_daily:.4f}")
+        print(f"   ├─ Weekly: ${current_daily * 7:.4f}")
+        print(f"   └─ Monthly: ${current_daily * 30.44:.4f}")
+        
+        print(f"   {clean_compare_name}:")
+        print(f"   ├─ Daily: ${alt_daily:.4f}")
+        print(f"   ├─ Weekly: ${alt_daily * 7:.4f}")
+        print(f"   └─ Monthly: ${alt_daily * 30.44:.4f}")
+        
+        # Token breakdown with costs
+        print(f"\n🔢 TOKEN USAGE & COST BREAKDOWN")
+        
+        # Get pricing for current and alternative models
+        pricing_data = claude_analyzer.models_api.get_pricing()
+        
+        def clean_model_for_pricing(model_name):
+            """Clean model name for pricing lookup."""
+            # Remove common prefixes
+            for prefix in ['anthropic/', 'openrouter/', 'openai/', 'groq/']:
+                if model_name.startswith(prefix):
+                    model_name = model_name[len(prefix):]
+            # Handle nested prefixes like 'openrouter/openai/gpt-4o-mini'
+            if '/' in model_name:
+                parts = model_name.split('/')
+                model_name = parts[-1]  # Take the last part
+            return model_name
+        
+        current_model_raw = next(iter(current_models)) if current_models else 'claude-sonnet-4-20250514'
+        current_model_for_pricing = clean_model_for_pricing(current_model_raw)
+        alt_model_for_pricing = clean_model_for_pricing(compare_model)
+        
+        current_pricing = pricing_data.get(current_model_for_pricing, {})
+        alt_pricing = pricing_data.get(alt_model_for_pricing, {})
+        
+        if current_pricing and alt_pricing:
+            # Input tokens
+            current_input_rate = current_pricing.get('input', current_pricing.get('prompt', 0))
+            alt_input_rate = alt_pricing.get('input', alt_pricing.get('prompt', 0))
+            current_input_cost = total_tokens.input_tokens * current_input_rate / 1_000_000
+            alt_input_cost = total_tokens.input_tokens * alt_input_rate / 1_000_000
+            
+            # Output tokens
+            current_output_rate = current_pricing.get('output', current_pricing.get('completion', 0))
+            alt_output_rate = alt_pricing.get('output', alt_pricing.get('completion', 0))
+            current_output_cost = total_tokens.output_tokens * current_output_rate / 1_000_000
+            alt_output_cost = total_tokens.output_tokens * alt_output_rate / 1_000_000
+            
+            # Cache tokens
+            current_cache_create_rate = current_pricing.get('cache_write', current_pricing.get('cache_creation_input', current_input_rate))
+            alt_cache_create_rate = alt_pricing.get('cache_write', alt_pricing.get('cache_creation_input', alt_input_rate))
+            current_cache_create_cost = total_tokens.cache_creation_input_tokens * current_cache_create_rate / 1_000_000
+            alt_cache_create_cost = total_tokens.cache_creation_input_tokens * alt_cache_create_rate / 1_000_000
+            
+            current_cache_read_rate = current_pricing.get('cache_read', current_pricing.get('cache_read_input', current_input_rate))
+            alt_cache_read_rate = alt_pricing.get('cache_read', alt_pricing.get('cache_read_input', alt_input_rate))
+            current_cache_read_cost = total_tokens.cache_read_input_tokens * current_cache_read_rate / 1_000_000
+            alt_cache_read_cost = total_tokens.cache_read_input_tokens * alt_cache_read_rate / 1_000_000
+            
+            print(f"   Input tokens ({total_tokens.input_tokens:,}):")
+            print(f"   ├─ Current: ${current_input_cost:.6f}")
+            print(f"   └─ {clean_compare_name}: ${alt_input_cost:.6f}")
+            
+            print(f"   Output tokens ({total_tokens.output_tokens:,}):")
+            print(f"   ├─ Current: ${current_output_cost:.6f}")
+            print(f"   └─ {clean_compare_name}: ${alt_output_cost:.6f}")
+            
+            if total_tokens.cache_creation_input_tokens > 0:
+                print(f"   Cache creation ({total_tokens.cache_creation_input_tokens:,}):")
+                print(f"   ├─ Current: ${current_cache_create_cost:.6f}")
+                print(f"   └─ {clean_compare_name}: ${alt_cache_create_cost:.6f}")
+                
+            if total_tokens.cache_read_input_tokens > 0:
+                print(f"   Cache read ({total_tokens.cache_read_input_tokens:,}):")
+                print(f"   ├─ Current: ${current_cache_read_cost:.6f}")
+                print(f"   └─ {clean_compare_name}: ${alt_cache_read_cost:.6f}")
+        else:
+            print(f"   ⚠️  Pricing data not available for detailed token breakdown")
+            print(f"   Current model: {current_model_for_pricing} - Available: {'Yes' if current_pricing else 'No'}")
+            print(f"   Compare model: {alt_model_for_pricing} - Available: {'Yes' if alt_pricing else 'No'}")
+            
+        print("=" * 80)
+        
+    except Exception as e:
+        print(f"⚠️  Error generating comparison summary: {str(e)}")
+
+
+def clean_model_name_for_display(model_name: str) -> str:
+    """Clean up model name for display."""
+    model_lower = model_name.lower()
+    
+    # Claude models
+    if 'claude' in model_lower:
+        if 'haiku' in model_lower:
+            return 'Claude 3.5 Haiku'
+        elif 'sonnet' in model_lower:
+            if '4' in model_lower:
+                return 'Claude Sonnet 4'
+            else:
+                return 'Claude 3.5 Sonnet'
+        elif 'opus' in model_lower:
+            return 'Claude 3 Opus'
+    
+    # OpenAI models
+    elif 'gpt' in model_lower or 'o1' in model_lower:
+        if 'gpt-4o' in model_lower:
+            return 'GPT-4 Omni'
+        elif 'gpt-4' in model_lower:
+            return 'GPT-4'
+        elif 'gpt-3.5' in model_lower:
+            return 'GPT-3.5'
+        elif 'o1-preview' in model_lower:
+            return 'GPT-o1 Preview'
+        elif 'o1-mini' in model_lower:
+            return 'GPT-o1 Mini'
+    
+    # Groq models
+    elif 'llama' in model_lower:
+        if '70b' in model_lower:
+            return 'Llama 3 70B (Groq)'
+        elif '8b' in model_lower:
+            return 'Llama 3 8B (Groq)'
+        else:
+            return 'Llama (Groq)'
+    elif 'mixtral' in model_lower:
+        return 'Mixtral 8x7B (Groq)'
+    elif 'gemma' in model_lower:
+        return 'Gemma 2 (Groq)'
+    
+    return model_name
+
+
 def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 10, claude_analyzer=None, compare_model: str = None):
     """Print a clean, unified summary of both Claude Code and OpenCode sessions."""
     if not summaries:
@@ -1425,7 +1618,12 @@ def main():
         if claude_summaries and not args.opencode_only:
             analyzer_for_cost = claude_analyzer
         
-        print_unified_summary(all_summaries, args.recent, analyzer_for_cost, args.compare_model)
+        if args.compare_model:
+            # Show dedicated comparison summary for model comparison
+            print_dedicated_comparison_summary(all_summaries, args.compare_model, analyzer_for_cost)
+        else:
+            # Show regular unified summary
+            print_unified_summary(all_summaries, args.recent, analyzer_for_cost, args.compare_model)
         
         # Add verbose option for detailed breakdowns if requested
         if hasattr(args, 'verbose') and args.verbose:
