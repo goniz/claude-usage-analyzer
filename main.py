@@ -1030,7 +1030,7 @@ def print_unified_summary(
                 print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read, {total_tokens.cache_creation_input_tokens:,} created")
     
     # Top projects (simplified)
-    project_usage = defaultdict(int)
+    project_usage: Dict[str, int] = defaultdict(int)
     for summary in summaries:
         clean_name = clean_project_name(summary.project_path)
         usage = summary.token_usage
@@ -1045,7 +1045,7 @@ def print_unified_summary(
             print(f"   {project}: {tokens:,} tokens ({percentage:.1f}%)")
     
     # Model breakdown (if multiple models)
-    model_usage = defaultdict(int)
+    model_usage: Dict[str, int] = defaultdict(int)
     for summary in summaries:
         model = summary.model or 'unknown'
         
@@ -1217,8 +1217,10 @@ def main() -> int:
         return 1
     
     try:
-        claude_summaries = []
-        opencode_summaries = []
+        claude_summaries: List[SessionSummary] = []
+        opencode_summaries: List[SessionSummary] = []
+        claude_analyzer: Optional[ClaudeUsageAnalyzer] = None
+        opencode_analyzer = None  # Runtime-only; type not declared to avoid missing symbol
         
         # Analyze Claude Code sessions unless --opencode-only is specified
         if not args.opencode_only:
@@ -1283,7 +1285,7 @@ def main() -> int:
             return 0
         
         # Always use the unified summary for a cleaner experience
-        analyzer_for_cost = None
+        analyzer_for_cost: Optional[ClaudeUsageAnalyzer] = None
         if claude_summaries and not args.opencode_only:
             analyzer_for_cost = claude_analyzer
         
