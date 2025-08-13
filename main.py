@@ -918,15 +918,36 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
         if claude_cost > 0 and opencode_cost > 0:
             print(f"   └─ Claude Code: ${claude_cost:.2f}, OpenCode: ${opencode_cost:.4f}")
         
+        # Calculate date range and cost averages
+        sessions_with_time = [s for s in summaries if s.start_time]
+        if sessions_with_time:
+            earliest_date = min(s.start_time for s in sessions_with_time).date()
+            latest_date = max(s.start_time for s in sessions_with_time).date()
+            total_days = (latest_date - earliest_date).days + 1  # +1 to include both start and end dates
+            
+            # Calculate averages
+            avg_daily_cost = total_cost / total_days if total_days > 0 else 0
+            avg_weekly_cost = avg_daily_cost * 7
+            avg_monthly_cost = avg_daily_cost * 30.44  # Average days per month (365.25/12)
+            
+            print(f"📅 {earliest_date} to {latest_date} ({total_days} days)")
+            print(f"📊 Daily: ${avg_daily_cost:.2f} | Weekly: ${avg_weekly_cost:.2f} | Monthly: ${avg_monthly_cost:.2f}")
+            
+            # Add disclaimer for limited data
+            if total_days < 7:
+                print(f"⚠️  Projections based on {total_days} days - costs may vary significantly")
+            elif total_days < 30:
+                print(f"⚠️  Monthly projection based on {total_days} days - consider seasonal patterns")
+        
         # Cost comparison with alternative model if requested
         if compare_model and claude_analyzer and claude_summaries:
             try:
-                alt_cost = calculate_alternative_model_cost(claude_summaries, compare_model, claude_analyzer)
-                alt_total_cost = alt_cost + opencode_cost
+                alt_cost = calculate_alternative_model_cost(summaries, compare_model, claude_analyzer)
+                alt_total_cost = alt_cost  # alt_cost now includes all sessions, no need to add opencode_cost
                 
-                if alt_cost > 0 and abs(alt_cost - claude_cost) > 0.001:  # Avoid floating point comparison issues
-                    cost_diff = claude_cost - alt_cost
-                    percentage_diff = (cost_diff / claude_cost) * 100 if claude_cost > 0 else 0
+                if alt_cost > 0 and abs(alt_cost - total_cost) > 0.001:  # Avoid floating point comparison issues
+                    cost_diff = total_cost - alt_cost
+                    percentage_diff = (cost_diff / total_cost) * 100 if total_cost > 0 else 0
                     
                     # Clean up model name for display
                     clean_model_name = compare_model
@@ -983,8 +1004,21 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
                         print(f"{model_emoji} Alternative: {clean_model_name} would cost ${alt_total_cost:.2f} (save ${cost_diff:.2f}, -{percentage_diff:.1f}%)")
                     elif cost_diff < 0:
                         print(f"{model_emoji} Alternative: {clean_model_name} would cost ${alt_total_cost:.2f} (cost ${-cost_diff:.2f} more, +{-percentage_diff:.1f}%)")
+                    
+                    # Add alternative cost projections if we have time data
+                    if sessions_with_time and total_days > 0:
+                        alt_avg_daily = alt_total_cost / total_days
+                        alt_avg_weekly = alt_avg_daily * 7
+                        alt_avg_monthly = alt_avg_daily * 30.44
+                        print(f"   └─ Alt. Daily: ${alt_avg_daily:.2f} | Weekly: ${alt_avg_weekly:.2f} | Monthly: ${alt_avg_monthly:.2f}")
                 elif alt_cost > 0:
                     print(f"📊 Alternative: {clean_model_name} would cost ${alt_total_cost:.2f} (same cost)")
+                    # Add alternative cost projections for same cost case too
+                    if sessions_with_time and total_days > 0:
+                        alt_avg_daily = alt_total_cost / total_days
+                        alt_avg_weekly = alt_avg_daily * 7
+                        alt_avg_monthly = alt_avg_daily * 30.44
+                        print(f"   └─ Alt. Daily: ${alt_avg_daily:.2f} | Weekly: ${alt_avg_weekly:.2f} | Monthly: ${alt_avg_monthly:.2f}")
                 else:
                     print(f"⚠️  Could not calculate cost for '{compare_model}' (model not found in pricing data)")
             except Exception as e:
@@ -1016,17 +1050,6 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
     model_usage = defaultdict(int)
     for summary in summaries:
         model = summary.model or 'unknown'
-        if model != 'unknown':
-            # Clean up model names for display
-            if 'claude' in model.lower():
-                model = 'Claude ' + model.split('-')[-1] if '-' in model else 'Claude'
-            elif 'gpt' in model.lower():
-                if '120b' in model:
-                    model = 'GPT-4 (120B)'
-                elif '20b' in model:
-                    model = 'GPT-4 (20B)'
-                else:
-                    model = 'GPT-4'
         
         usage = summary.token_usage
         tokens = usage.input_tokens + usage.output_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
