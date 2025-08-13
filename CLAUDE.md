@@ -111,11 +111,18 @@ The script automatically discovers:
 
 ### Setup
 ```bash
-uv sync
+uv sync                                     # Install dependencies
+```
+
+### Running Tests and Validation
+```bash
+uv run main.py --help                       # Verify installation and see all options
+uv run main.py --list-providers             # List available providers
+uv run main.py --list-models anthropic      # List models for specific provider
 ```
 
 ### Dependencies
-Project uses uv with Python 3.12 as specified in `.python-version`.
+Project uses uv for dependency management with Python 3.12 as specified in `.python-version`. Main dependency is `requests>=2.31.0` for API calls.
 
 ## Pricing Configuration
 
