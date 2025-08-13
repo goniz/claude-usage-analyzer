@@ -9,6 +9,8 @@ Session files are stored in ~/.claude/projects/ as .jsonl files.
 import json
 import os
 import glob
+import requests
+import time
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
@@ -40,96 +42,89 @@ class SessionSummary:
 
 
 class ClaudeUsageAnalyzer:
-    # Claude pricing (as of January 2025) - prices per 1M tokens
-    PRICING = {
-        # Latest Claude 4 Models
-        'claude-4.1-opus': {
-            'input': 15.00,
-            'output': 75.00,
-            'cache_write': 18.75,
-            'cache_read': 1.50,
-        },
-        'claude-opus-4.1': {
-            'input': 15.00,
-            'output': 75.00,
-            'cache_write': 18.75,
-            'cache_read': 1.50,
-        },
-        'claude-4-opus': {
-            'input': 15.00,
-            'output': 75.00,
-            'cache_write': 18.75,
-            'cache_read': 1.50,
-        },
-        'claude-sonnet-4-20250514': {
-            'input': 3.00,  # ≤200K tokens
-            'output': 15.00,  # ≤200K tokens
-            'cache_write': 3.75,
-            'cache_read': 0.30,
-        },
-        'claude-4-sonnet': {
-            'input': 3.00,  # ≤200K tokens
-            'output': 15.00,  # ≤200K tokens
-            'cache_write': 3.75,
-            'cache_read': 0.30,
-        },
-        'claude-3-5-haiku-20241022': {
-            'input': 0.80,
-            'output': 4.00,
-            'cache_write': 1.00,
-            'cache_read': 0.08,
-        },
-        'claude-haiku-3-5': {
-            'input': 0.80,
-            'output': 4.00,
-            'cache_write': 1.00,
-            'cache_read': 0.08,
-        },
-        
-        # Legacy Models
-        'claude-3-5-sonnet-20241022': {
-            'input': 3.00,
-            'output': 15.00,
-            'cache_write': 3.75,
-            'cache_read': 0.30,
-        },
-        'claude-3-opus': {
-            'input': 15.00,
-            'output': 75.00,
-            'cache_write': 18.75,
-            'cache_read': 1.50,
-        },
-        'claude-3-haiku': {
-            'input': 0.25,
-            'output': 1.25,
-            'cache_write': 0.30,
-            'cache_read': 0.025,
-        },
-        
-        # Common model name variations
-        'claude-4': {  # Default to Sonnet 4
-            'input': 3.00,
-            'output': 15.00,
-            'cache_write': 3.75,
-            'cache_read': 0.30,
-        },
-        'claude-3.5-sonnet': {
-            'input': 3.00,
-            'output': 15.00,
-            'cache_write': 3.75,
-            'cache_read': 0.30,
-        },
-        'claude-3.5-haiku': {
-            'input': 0.80,
-            'output': 4.00,
-            'cache_write': 1.00,
-            'cache_read': 0.08,
-        },
-    }
+    # Models.dev API endpoint
+    MODELS_API_URL = "https://models.dev/api.json"
     
     def __init__(self, claude_dir: str = None):
         self.claude_dir = claude_dir or os.path.expanduser('~/.claude')
         self.projects_dir = os.path.join(self.claude_dir, 'projects')
+        self._pricing_cache = None
+        self._cache_timestamp = None
+        self._cache_ttl = 3600  # 1 hour cache TTL
+    
+    def _fetch_pricing_from_api(self) -> Dict:
+        """Fetch pricing data from models.dev API."""
+        try:
+            response = requests.get(self.MODELS_API_URL, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Transform API data to our pricing format
+            pricing = {}
+            
+            # Check multiple possible sections for Claude models
+            sections_to_check = ['anthropic', 'google-vertex-anthropic']
+            
+            for section_name in sections_to_check:
+                section_data = data.get(section_name, {})
+                if section_data and isinstance(section_data, dict):
+                    # Check if there's a 'models' key containing the actual model data
+                    models_data = section_data.get('models', {})
+                    if isinstance(models_data, dict):
+                        for model_id, model_data in models_data.items():
+                            if not isinstance(model_data, dict):
+                                continue
+                                
+                            cost_data = model_data.get('cost', {})
+                            
+                            if model_id and 'claude' in model_id.lower() and cost_data:
+                                input_price = cost_data.get('input')
+                                output_price = cost_data.get('output')
+                                cache_write_price = cost_data.get('cache_write')
+                                cache_read_price = cost_data.get('cache_read')
+                                
+                                if input_price is not None and output_price is not None:
+                                    pricing[model_id] = {
+                                        'input': input_price,
+                                        'output': output_price,
+                                        'cache_write': cache_write_price or input_price * 1.25,
+                                        'cache_read': cache_read_price or input_price * 0.1,
+                                    }
+            
+            if pricing:
+                print(f"Fetched pricing for {len(pricing)} Claude models from API")
+            return pricing
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch pricing from models.dev API: {e}")
+    
+    def _get_pricing(self) -> Dict:
+        """Get pricing data with caching."""
+        current_time = time.time()
+        
+        # Check if cache is valid
+        if (self._pricing_cache is not None and 
+            self._cache_timestamp is not None and 
+            current_time - self._cache_timestamp < self._cache_ttl):
+            return self._pricing_cache
+        
+        # Fetch fresh pricing data (required)
+        try:
+            api_pricing = self._fetch_pricing_from_api()
+            if not api_pricing:
+                raise RuntimeError("No Claude models found in API response")
+                
+            self._pricing_cache = api_pricing
+            self._cache_timestamp = current_time
+            print(f"Using pricing data from models.dev API ({len(api_pricing)} models)")
+            return self._pricing_cache
+            
+        except Exception as e:
+            if self._pricing_cache is not None:
+                print(f"Warning: Failed to refresh pricing data, using cached data: {e}")
+                return self._pricing_cache
+            else:
+                raise RuntimeError(f"Failed to fetch initial pricing data: {e}")
         
     def find_session_files(self) -> List[str]:
         """Find all .jsonl session files in the projects directory."""
@@ -192,11 +187,28 @@ class ClaudeUsageAnalyzer:
     
     def calculate_cost(self, token_usage: TokenUsage, model: str) -> float:
         """Calculate estimated cost based on token usage and model."""
-        if model not in self.PRICING:
-            # Use Sonnet 4 pricing as default
-            model = 'claude-sonnet-4-20250514'
+        pricing_data = self._get_pricing()
+        
+        pricing = pricing_data.get(model)
+        
+        if pricing is None:
+            # Try to find a default Claude model for fallback
+            default_models = ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022']
+            for default_model in default_models:
+                if default_model in pricing_data:
+                    pricing = pricing_data[default_model]
+                    print(f"Warning: No pricing found for {model}, using {default_model} pricing")
+                    break
             
-        pricing = self.PRICING[model]
+            if pricing is None:
+                # Use any available Claude model as last resort
+                available_models = [m for m in pricing_data.keys() if 'claude' in m.lower()]
+                if available_models:
+                    fallback_model = available_models[0]
+                    pricing = pricing_data[fallback_model]
+                    print(f"Warning: No pricing found for {model}, using {fallback_model} pricing")
+                else:
+                    raise RuntimeError(f"No pricing data available for model {model} and no Claude models found in API data")
         
         cost = 0.0
         cost += (token_usage.input_tokens / 1_000_000) * pricing['input']
@@ -313,15 +325,24 @@ class ClaudeUsageAnalyzer:
 
 
 def main():
-    analyzer = ClaudeUsageAnalyzer()
-    
-    if not os.path.exists(analyzer.projects_dir):
-        print(f"Error: Claude projects directory not found at {analyzer.projects_dir}")
-        print("Make sure Claude Code has been used and session data exists.")
-        return
-    
-    summaries = analyzer.analyze_all_sessions()
-    analyzer.print_summary(summaries)
+    try:
+        analyzer = ClaudeUsageAnalyzer()
+        
+        if not os.path.exists(analyzer.projects_dir):
+            print(f"Error: Claude projects directory not found at {analyzer.projects_dir}")
+            print("Make sure Claude Code has been used and session data exists.")
+            return
+        
+        summaries = analyzer.analyze_all_sessions()
+        analyzer.print_summary(summaries)
+        
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        print("Make sure you have internet connectivity to fetch pricing data from models.dev")
+        return 1
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return 1
 
 
 if __name__ == '__main__':
