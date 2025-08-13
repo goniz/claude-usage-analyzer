@@ -512,6 +512,10 @@ class OpenCodeUsageAnalyzer:
             if not self._quiet:
                 print(f"Error reading session info {info_filepath}: {e}")
         
+        # Ensure OpenCode sessions are marked as such (set default provider if none found)
+        if not summary.provider:
+            summary.provider = "unknown"
+        
         return summary
     
     def analyze_all_sessions(self) -> List[SessionSummary]:
@@ -660,23 +664,29 @@ class OpenCodeUsageAnalyzer:
                 print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${session.cost:.4f})")
 
 
-def print_combined_summary(summaries: List[SessionSummary], recent_count: int = 10):
-    """Print a combined summary of both Claude Code and OpenCode sessions."""
+def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 10, claude_analyzer=None):
+    """Print a clean, unified summary of both Claude Code and OpenCode sessions."""
     if not summaries:
+        print("No session data found.")
         return
     
-    # Separate by source (OpenCode has provider field, Claude Code doesn't)
-    claude_summaries = [s for s in summaries if not s.provider]  # Claude Code doesn't have provider field set
-    opencode_summaries = [s for s in summaries if s.provider]  # OpenCode has provider field set
+    # Separate by source (based on the actual filtered summaries)
+    claude_summaries = [s for s in summaries if not s.provider]
+    opencode_summaries = [s for s in summaries if s.provider]
     
-    # Overall statistics
+    # Debug: check provider field values
+    # print(f"Debug: Total summaries: {len(summaries)}")
+    # print(f"Debug: Sessions without provider: {len(claude_summaries)}")  
+    # print(f"Debug: Sessions with provider: {len(opencode_summaries)}")
+    # for s in summaries[:5]:
+    #     print(f"Debug: session {s.session_id}: provider='{s.provider}', model='{s.model}'")  
+    
+    # Calculate stats
     total_sessions = len(summaries)
     total_messages = sum(s.messages_count for s in summaries)
     
     # Aggregate token usage
     total_tokens = TokenUsage()
-    total_cost = sum(s.cost for s in summaries)
-    
     for summary in summaries:
         usage = summary.token_usage
         total_tokens.input_tokens += usage.input_tokens
@@ -684,41 +694,131 @@ def print_combined_summary(summaries: List[SessionSummary], recent_count: int = 
         total_tokens.cache_creation_input_tokens += usage.cache_creation_input_tokens
         total_tokens.cache_read_input_tokens += usage.cache_read_input_tokens
     
-    # Print combined results
-    print("\n" + "=" * 80)
-    print("COMBINED USAGE SUMMARY (CLAUDE CODE + OPENCODE)")
-    print("=" * 80)
+    total_all_tokens = (total_tokens.input_tokens + total_tokens.output_tokens + 
+                       total_tokens.cache_creation_input_tokens + total_tokens.cache_read_input_tokens)
     
-    print(f"\nOverall Statistics:")
-    print(f"  Total Sessions: {total_sessions:,} (Claude Code: {len(claude_summaries):,}, OpenCode: {len(opencode_summaries):,})")
-    print(f"  Total Messages: {total_messages:,}")
+    # Calculate costs
+    opencode_cost = sum(s.cost for s in opencode_summaries)
+    claude_cost = 0.0
+    if claude_summaries and claude_analyzer:
+        try:
+            claude_total_usage = TokenUsage()
+            for s in claude_summaries:
+                claude_total_usage.input_tokens += s.token_usage.input_tokens
+                claude_total_usage.output_tokens += s.token_usage.output_tokens
+                claude_total_usage.cache_creation_input_tokens += s.token_usage.cache_creation_input_tokens
+                claude_total_usage.cache_read_input_tokens += s.token_usage.cache_read_input_tokens
+            claude_cost = claude_analyzer.calculate_cost(claude_total_usage, 'claude-sonnet-4-20250514')
+        except:
+            claude_cost = 0.0
     
-    print(f"\nTotal Token Usage:")
-    print(f"  Input Tokens:              {total_tokens.input_tokens:,}")
-    print(f"  Output Tokens:             {total_tokens.output_tokens:,}")
-    print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,}")
-    print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,}")
-    total_all_tokens = total_tokens.input_tokens + total_tokens.output_tokens + total_tokens.cache_creation_input_tokens + total_tokens.cache_read_input_tokens
-    print(f"  Total Tokens:              {total_all_tokens:,}")
+    total_cost = claude_cost + opencode_cost
+    
+    # Clean project names
+    def clean_project_name(project_path):
+        if project_path.startswith('-home-'):
+            return project_path.replace('-home-goniz-dev-', '').replace('-home-goniz-', '').replace('-root-', '')
+        return project_path
+    
+    # Print clean summary
+    print(f"\n📊 AI Usage Summary")
+    print(f"━" * 50)
+    
+    # Basic stats
+    if len(claude_summaries) > 0 and len(opencode_summaries) > 0:
+        print(f"💬 {total_sessions:,} sessions ({len(claude_summaries):,} Claude Code, {len(opencode_summaries):,} OpenCode)")
+    elif len(claude_summaries) > 0:
+        print(f"💬 {total_sessions:,} Claude Code sessions")
+    elif len(opencode_summaries) > 0:
+        print(f"💬 {total_sessions:,} OpenCode sessions")
+    else:
+        print(f"💬 {total_sessions:,} sessions")
+    
+    print(f"📝 {total_messages:,} messages")
+    print(f"🔤 {total_all_tokens:,} tokens total")
     
     if total_cost > 0:
-        print(f"\nTotal Cost: ${total_cost:.4f} (OpenCode only - Claude Code costs calculated separately)")
+        print(f"💰 ${total_cost:.2f} estimated cost")
+        if claude_cost > 0 and opencode_cost > 0:
+            print(f"   └─ Claude Code: ${claude_cost:.2f}, OpenCode: ${opencode_cost:.4f}")
     
-    # Recent sessions from both platforms
+    # Token breakdown (simplified)
+    if total_tokens.cache_read_input_tokens > 0 or total_tokens.cache_creation_input_tokens > 0:
+        print(f"\n📈 Token breakdown:")
+        print(f"   Input: {total_tokens.input_tokens:,} | Output: {total_tokens.output_tokens:,}")
+        if total_tokens.cache_read_input_tokens > 0:
+            print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read, {total_tokens.cache_creation_input_tokens:,} created")
+    
+    # Top projects (simplified)
+    project_usage = defaultdict(int)
+    for summary in summaries:
+        clean_name = clean_project_name(summary.project_path)
+        usage = summary.token_usage
+        project_tokens = usage.input_tokens + usage.output_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+        project_usage[clean_name] += project_tokens
+    
+    if len(project_usage) > 1:
+        print(f"\n🗂️  Top projects:")
+        sorted_projects = sorted(project_usage.items(), key=lambda x: x[1], reverse=True)[:3]
+        for project, tokens in sorted_projects:
+            percentage = (tokens / total_all_tokens) * 100 if total_all_tokens > 0 else 0
+            print(f"   {project}: {tokens:,} tokens ({percentage:.1f}%)")
+    
+    # Model breakdown (if multiple models)
+    model_usage = defaultdict(int)
+    for summary in summaries:
+        model = summary.model or 'unknown'
+        if model != 'unknown':
+            # Clean up model names for display
+            if 'claude' in model.lower():
+                model = 'Claude ' + model.split('-')[-1] if '-' in model else 'Claude'
+            elif 'gpt' in model.lower():
+                if '120b' in model:
+                    model = 'GPT-4 (120B)'
+                elif '20b' in model:
+                    model = 'GPT-4 (20B)'
+                else:
+                    model = 'GPT-4'
+        
+        usage = summary.token_usage
+        tokens = usage.input_tokens + usage.output_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+        model_usage[model] += tokens
+    
+    # Only show model breakdown if there are multiple models
+    valid_models = {k: v for k, v in model_usage.items() if k != 'unknown' and v > 0}
+    if len(valid_models) > 1:
+        print(f"\n🤖 Models used:")
+        sorted_models = sorted(valid_models.items(), key=lambda x: x[1], reverse=True)
+        for model, tokens in sorted_models:
+            percentage = (tokens / total_all_tokens) * 100 if total_all_tokens > 0 else 0
+            print(f"   {model}: {tokens:,} tokens ({percentage:.1f}%)")
+    
+    # Recent activity (simplified)
     recent_sessions = sorted([s for s in summaries if s.start_time], 
                            key=lambda x: x.start_time, reverse=True)[:recent_count]
     
     if recent_sessions:
-        print(f"\nRecent Sessions (Last {min(recent_count, len(recent_sessions))}) - Combined:")
+        print(f"\n⏱️  Recent activity:")
         for session in recent_sessions:
             total_session_tokens = (session.token_usage.input_tokens + 
                                   session.token_usage.output_tokens + 
                                   session.token_usage.cache_creation_input_tokens + 
                                   session.token_usage.cache_read_input_tokens)
-            time_str = session.start_time.strftime('%Y-%m-%d %H:%M') if session.start_time else 'Unknown'
-            source = "OpenCode" if session.provider else "Claude Code"
-            cost_str = f"${session.cost:.4f}" if session.provider else "N/A"
-            print(f"  {time_str} - {session.project_path} ({source}): {total_session_tokens:,} tokens ({cost_str})")
+            
+            time_str = session.start_time.strftime('%m/%d %H:%M') if session.start_time else 'Unknown'
+            clean_project = clean_project_name(session.project_path)
+            source_icon = "🔵" if session.provider else "🟣"
+            
+            if total_session_tokens >= 1_000_000:
+                token_str = f"{total_session_tokens/1_000_000:.1f}M"
+            elif total_session_tokens >= 1_000:
+                token_str = f"{total_session_tokens/1_000:.1f}K"
+            else:
+                token_str = str(total_session_tokens)
+            
+            print(f"   {source_icon} {time_str} {clean_project} ({token_str} tokens)")
+    
+    print()
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -728,12 +828,11 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                              # Analyze both Claude Code and OpenCode
+  %(prog)s                              # Clean unified summary (both platforms)
   %(prog)s --claude-only                # Analyze only Claude Code sessions
   %(prog)s --opencode-only              # Analyze only OpenCode sessions
-  %(prog)s --claude-dir /path/to/claude # Analyze custom Claude directory
-  %(prog)s --opencode-dir /path/to/oc   # Analyze custom OpenCode directory
-  %(prog)s --recent 5                   # Show only last 5 sessions
+  %(prog)s --verbose                    # Show detailed platform breakdowns
+  %(prog)s --recent 5                   # Show only last 5 recent sessions
   %(prog)s --project my-project         # Filter by specific project
   %(prog)s --model claude-sonnet-4      # Filter by specific model
         """
@@ -798,6 +897,12 @@ Examples:
         help='Suppress progress messages and warnings'
     )
     
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Show detailed breakdowns for each platform (default: unified summary only)'
+    )
+    
     return parser
 
 
@@ -817,7 +922,9 @@ def main():
         # Analyze Claude Code sessions unless --opencode-only is specified
         if not args.opencode_only:
             try:
-                claude_analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=args.quiet)
+                # Make it quiet by default unless verbose is requested
+                claude_quiet = args.quiet or not args.verbose
+                claude_analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=claude_quiet)
                 
                 # Force cache refresh if requested
                 if args.no_cache:
@@ -827,7 +934,7 @@ def main():
                 if os.path.exists(claude_analyzer.projects_dir):
                     claude_summaries = claude_analyzer.analyze_all_sessions()
                     claude_analyzer._recent_count = args.recent
-                elif not args.quiet:
+                elif args.verbose:
                     print(f"Claude Code projects directory not found at {claude_analyzer.projects_dir}")
             except Exception as e:
                 if not args.quiet:
@@ -838,12 +945,14 @@ def main():
         # Analyze OpenCode sessions unless --claude-only is specified
         if not args.claude_only:
             try:
-                opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=args.quiet)
+                # Make it quiet by default unless verbose is requested
+                opencode_quiet = args.quiet or not args.verbose
+                opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=opencode_quiet)
                 
                 if os.path.exists(opencode_analyzer.projects_dir):
                     opencode_summaries = opencode_analyzer.analyze_all_sessions()
                     opencode_analyzer._recent_count = args.recent
-                elif not args.quiet:
+                elif args.verbose:
                     print(f"OpenCode projects directory not found at {opencode_analyzer.projects_dir}")
             except Exception as e:
                 if not args.quiet:
@@ -851,8 +960,12 @@ def main():
                 if args.opencode_only:
                     return 1
         
-        # Apply filters to all summaries
-        all_summaries = claude_summaries + opencode_summaries
+        # Apply filters to appropriate summaries based on flags
+        all_summaries = []
+        if not args.opencode_only:
+            all_summaries.extend(claude_summaries)
+        if not args.claude_only:
+            all_summaries.extend(opencode_summaries)
         
         if args.project:
             all_summaries = [s for s in all_summaries if args.project.lower() in s.project_path.lower()]
@@ -866,28 +979,31 @@ def main():
                 print(f"No sessions found for model '{args.model}'")
                 return 0
         
-        # Print summaries
+        # Print unified summary
         if not all_summaries:
-            print("No session data found in any analyzed directories.")
+            print("No session data found.")
             return 0
         
-        # Print Claude Code summary if we have data
+        # Always use the unified summary for a cleaner experience
+        analyzer_for_cost = None
         if claude_summaries and not args.opencode_only:
-            filtered_claude = [s for s in claude_summaries if s in all_summaries]
-            if filtered_claude:
-                claude_analyzer._recent_count = args.recent
-                claude_analyzer.print_summary(filtered_claude)
+            analyzer_for_cost = claude_analyzer
         
-        # Print OpenCode summary if we have data
-        if opencode_summaries and not args.claude_only:
-            filtered_opencode = [s for s in opencode_summaries if s in all_summaries]
-            if filtered_opencode:
-                opencode_analyzer._recent_count = args.recent
-                opencode_analyzer.print_summary(filtered_opencode)
+        print_unified_summary(all_summaries, args.recent, analyzer_for_cost)
         
-        # Print combined summary if analyzing both
-        if not args.claude_only and not args.opencode_only and claude_summaries and opencode_summaries:
-            print_combined_summary(all_summaries, args.recent)
+        # Add verbose option for detailed breakdowns if requested
+        if hasattr(args, 'verbose') and args.verbose:
+            if claude_summaries and not args.opencode_only:
+                filtered_claude = [s for s in claude_summaries if s in all_summaries]
+                if filtered_claude:
+                    claude_analyzer._recent_count = args.recent
+                    claude_analyzer.print_summary(filtered_claude)
+            
+            if opencode_summaries and not args.claude_only:
+                filtered_opencode = [s for s in opencode_summaries if s in all_summaries]
+                if filtered_opencode:
+                    opencode_analyzer._recent_count = args.recent
+                    opencode_analyzer.print_summary(filtered_opencode)
         
     except RuntimeError as e:
         if not args.quiet:
