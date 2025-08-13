@@ -6,6 +6,7 @@ Parses Claude Code session files and displays token usage summary with cost esti
 Session files are stored in ~/.claude/projects/ as .jsonl files.
 """
 
+import argparse
 import json
 import os
 import glob
@@ -45,12 +46,14 @@ class ClaudeUsageAnalyzer:
     # Models.dev API endpoint
     MODELS_API_URL = "https://models.dev/api.json"
     
-    def __init__(self, claude_dir: str = None):
+    def __init__(self, claude_dir: str = None, quiet: bool = False):
         self.claude_dir = claude_dir or os.path.expanduser('~/.claude')
         self.projects_dir = os.path.join(self.claude_dir, 'projects')
         self._pricing_cache = None
         self._cache_timestamp = None
         self._cache_ttl = 3600  # 1 hour cache TTL
+        self._quiet = quiet
+        self._recent_count = 10
     
     def _fetch_pricing_from_api(self) -> Dict:
         """Fetch pricing data from models.dev API."""
@@ -91,7 +94,7 @@ class ClaudeUsageAnalyzer:
                                         'cache_read': cache_read_price or input_price * 0.1,
                                     }
             
-            if pricing:
+            if pricing and not self._quiet:
                 print(f"Fetched pricing for {len(pricing)} Claude models from API")
             return pricing
             
@@ -116,12 +119,14 @@ class ClaudeUsageAnalyzer:
                 
             self._pricing_cache = api_pricing
             self._cache_timestamp = current_time
-            print(f"Using pricing data from models.dev API ({len(api_pricing)} models)")
+            if not self._quiet:
+                print(f"Using pricing data from models.dev API ({len(api_pricing)} models)")
             return self._pricing_cache
             
         except Exception as e:
             if self._pricing_cache is not None:
-                print(f"Warning: Failed to refresh pricing data, using cached data: {e}")
+                if not self._quiet:
+                    print(f"Warning: Failed to refresh pricing data, using cached data: {e}")
                 return self._pricing_cache
             else:
                 raise RuntimeError(f"Failed to fetch initial pricing data: {e}")
@@ -197,7 +202,8 @@ class ClaudeUsageAnalyzer:
             for default_model in default_models:
                 if default_model in pricing_data:
                     pricing = pricing_data[default_model]
-                    print(f"Warning: No pricing found for {model}, using {default_model} pricing")
+                    if not self._quiet:
+                        print(f"Warning: No pricing found for {model}, using {default_model} pricing")
                     break
             
             if pricing is None:
@@ -206,7 +212,8 @@ class ClaudeUsageAnalyzer:
                 if available_models:
                     fallback_model = available_models[0]
                     pricing = pricing_data[fallback_model]
-                    print(f"Warning: No pricing found for {model}, using {fallback_model} pricing")
+                    if not self._quiet:
+                        print(f"Warning: No pricing found for {model}, using {fallback_model} pricing")
                 else:
                     raise RuntimeError(f"No pricing data available for model {model} and no Claude models found in API data")
         
@@ -223,7 +230,8 @@ class ClaudeUsageAnalyzer:
         session_files = self.find_session_files()
         summaries = []
         
-        print(f"Found {len(session_files)} session files to analyze...")
+        if not self._quiet:
+            print(f"Found {len(session_files)} session files to analyze...")
         
         for filepath in session_files:
             summary = self.parse_session_file(filepath)
@@ -291,6 +299,63 @@ class ClaudeUsageAnalyzer:
         
         print(f"\nEstimated Total Cost: ${total_cost:.2f}")
         
+        # Calculate date range and cost averages
+        sessions_with_time = [s for s in summaries if s.start_time]
+        if sessions_with_time:
+            earliest_date = min(s.start_time for s in sessions_with_time).date()
+            latest_date = max(s.start_time for s in sessions_with_time).date()
+            total_days = (latest_date - earliest_date).days + 1  # +1 to include both start and end dates
+            
+            # Calculate averages
+            avg_daily_cost = total_cost / total_days if total_days > 0 else 0
+            avg_weekly_cost = avg_daily_cost * 7
+            avg_monthly_cost = avg_daily_cost * 30.44  # Average days per month (365.25/12)
+            
+            print(f"\nCost Averages:")
+            print(f"  Date Range: {earliest_date} to {latest_date} ({total_days} days)")
+            print(f"  Average Daily Cost: ${avg_daily_cost:.2f}")
+            print(f"  Average Weekly Cost: ${avg_weekly_cost:.2f}")
+            print(f"  Average Monthly Cost: ${avg_monthly_cost:.2f}")
+            
+            # Show actual breakdown by period if we have enough data
+            daily_costs = defaultdict(float)
+            monthly_costs = defaultdict(float)
+            
+            for summary in summaries:
+                if summary.start_time:
+                    date_key = summary.start_time.date()
+                    month_key = summary.start_time.strftime('%Y-%m')
+                    session_cost = self.calculate_cost(summary.token_usage, summary.model or 'claude-sonnet-4-20250514')
+                    daily_costs[date_key] += session_cost
+                    monthly_costs[month_key] += session_cost
+            
+            # Show daily breakdown if reasonable number of days
+            if 1 < total_days <= 14:
+                print(f"\nDaily Breakdown:")
+                for date in sorted(daily_costs.keys()):
+                    print(f"  {date}: ${daily_costs[date]:.2f}")
+            
+            # Show monthly breakdown if we have multiple months
+            if len(monthly_costs) > 1:
+                print(f"\nMonthly Breakdown:")
+                for month in sorted(monthly_costs.keys()):
+                    print(f"  {month}: ${monthly_costs[month]:.2f}")
+                actual_monthly_avg = sum(monthly_costs.values()) / len(monthly_costs)
+                print(f"  Actual Monthly Average: ${actual_monthly_avg:.2f}")
+            
+            # Show cost trend if we have multiple days
+            if total_days > 1:
+                sorted_dates = sorted(daily_costs.keys())
+                first_day_cost = daily_costs[sorted_dates[0]]
+                last_day_cost = daily_costs[sorted_dates[-1]]
+                
+                if first_day_cost > 0 and last_day_cost > 0:
+                    trend_change = ((last_day_cost - first_day_cost) / first_day_cost) * 100
+                    trend_direction = "📈 increasing" if trend_change > 10 else "📉 decreasing" if trend_change < -10 else "📊 stable"
+                    print(f"\nCost Trend: {trend_direction} ({trend_change:+.1f}% from first to last day)")
+        else:
+            print(f"\nCost Averages: Unable to calculate (no sessions with timestamps)")
+        
         # Model breakdown
         if len(model_usage) > 1:
             print(f"\nUsage by Model:")
@@ -310,10 +375,10 @@ class ClaudeUsageAnalyzer:
         
         # Recent sessions
         recent_sessions = sorted([s for s in summaries if s.start_time], 
-                               key=lambda x: x.start_time, reverse=True)[:10]
+                               key=lambda x: x.start_time, reverse=True)[:self._recent_count]
         
         if recent_sessions:
-            print(f"\nRecent Sessions (Last 10):")
+            print(f"\nRecent Sessions (Last {min(self._recent_count, len(recent_sessions))}):")
             for session in recent_sessions:
                 total_session_tokens = (session.token_usage.input_tokens + 
                                       session.token_usage.output_tokens + 
@@ -324,24 +389,109 @@ class ClaudeUsageAnalyzer:
                 print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${cost:.2f})")
 
 
+def create_parser() -> argparse.ArgumentParser:
+    """Create and configure the argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Analyze Claude Code session files and display token usage summary with cost estimates",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                              # Analyze default Claude directory
+  %(prog)s --claude-dir /path/to/claude # Analyze custom Claude directory
+  %(prog)s --recent 5                   # Show only last 5 sessions
+  %(prog)s --project my-project         # Filter by specific project
+  %(prog)s --model claude-sonnet-4      # Filter by specific model
+        """
+    )
+    
+    parser.add_argument(
+        '--claude-dir',
+        type=str,
+        default=None,
+        help='Path to Claude directory (default: ~/.claude)'
+    )
+    
+    parser.add_argument(
+        '--recent',
+        type=int,
+        default=10,
+        help='Number of recent sessions to display (default: 10)'
+    )
+    
+    parser.add_argument(
+        '--project',
+        type=str,
+        default=None,
+        help='Filter sessions by project name'
+    )
+    
+    parser.add_argument(
+        '--model',
+        type=str,
+        default=None,
+        help='Filter sessions by model name'
+    )
+    
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Force refresh pricing data from API (ignore cache)'
+    )
+    
+    parser.add_argument(
+        '--quiet',
+        action='store_true',
+        help='Suppress progress messages and warnings'
+    )
+    
+    return parser
+
+
 def main():
+    parser = create_parser()
+    args = parser.parse_args()
+    
     try:
-        analyzer = ClaudeUsageAnalyzer()
+        analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=args.quiet)
+        
+        # Force cache refresh if requested
+        if args.no_cache:
+            analyzer._pricing_cache = None
+            analyzer._cache_timestamp = None
         
         if not os.path.exists(analyzer.projects_dir):
             print(f"Error: Claude projects directory not found at {analyzer.projects_dir}")
             print("Make sure Claude Code has been used and session data exists.")
-            return
+            return 1
         
         summaries = analyzer.analyze_all_sessions()
+        
+        # Apply filters
+        if args.project:
+            summaries = [s for s in summaries if args.project.lower() in s.project_path.lower()]
+            if not summaries:
+                print(f"No sessions found for project '{args.project}'")
+                return 0
+        
+        if args.model:
+            summaries = [s for s in summaries if args.model.lower() in s.model.lower()]
+            if not summaries:
+                print(f"No sessions found for model '{args.model}'")
+                return 0
+        
+        # Update recent sessions count
+        analyzer._recent_count = args.recent
+        
         analyzer.print_summary(summaries)
         
     except RuntimeError as e:
-        print(f"Error: {e}")
-        print("Make sure you have internet connectivity to fetch pricing data from models.dev")
+        if not args.quiet:
+            print(f"Error: {e}")
+            print("Make sure you have internet connectivity to fetch pricing data from models.dev")
         return 1
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        if not args.quiet:
+            print(f"Unexpected error: {e}")
         return 1
 
 
