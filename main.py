@@ -317,6 +317,12 @@ class ClaudeUsageAnalyzer:
             print(f"  Average Weekly Cost: ${avg_weekly_cost:.2f}")
             print(f"  Average Monthly Cost: ${avg_monthly_cost:.2f}")
             
+            # Add disclaimer for limited data
+            if total_days < 7:
+                print(f"  ⚠️  Projections based on limited data ({total_days} days) - actual costs may vary significantly")
+            elif total_days < 30:
+                print(f"  ⚠️  Monthly projection based on {total_days} days - consider seasonal usage patterns")
+            
             # Show actual breakdown by period if we have enough data
             daily_costs = defaultdict(float)
             monthly_costs = defaultdict(float)
