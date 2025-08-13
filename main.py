@@ -16,7 +16,7 @@ from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 
 @dataclass
@@ -39,9 +39,9 @@ class SessionSummary:
     provider: str = ""
     cost: float = 0.0
     
-    def __post_init__(self):
-        if self.token_usage is None:
-            self.token_usage = TokenUsage()
+    def __post_init__(self) -> None:
+        # token_usage is guaranteed by default_factory
+        return None
 
 
 class ModelsDotDev:
@@ -52,9 +52,9 @@ class ModelsDotDev:
     
     def __init__(self, quiet: bool = False):
         self._quiet = quiet
-        self._pricing_cache = None
+        self._pricing_cache: Optional[Dict[str, Dict[str, Any]]] = None
     
-    def get_pricing(self) -> Dict:
+    def get_pricing(self) -> Dict[str, Dict[str, Any]]:
         """Get pricing data from models.dev API."""
         # Return cached data if available
         if self._pricing_cache is not None:
@@ -66,7 +66,7 @@ class ModelsDotDev:
             data = response.json()
             
             # Transform API data to our pricing format with provider info
-            pricing = {}
+            pricing: Dict[str, Dict[str, Any]] = {}
             
             # Iterate through all provider sections
             for provider_id, provider_data in data.items():
@@ -144,7 +144,7 @@ class ModelsDotDev:
         """Calculate estimated cost based on token usage and model."""
         pricing_data = self.get_pricing()
         
-        pricing = pricing_data.get(model)
+        pricing: Optional[Dict[str, Any]] = pricing_data.get(model)
         
         if pricing is None:
             # Try to find a default Claude model for fallback
@@ -167,11 +167,16 @@ class ModelsDotDev:
                 else:
                     raise RuntimeError(f"No pricing data available for model {model} and no Claude models found in API data")
         
+        assert pricing is not None
+        p_in = cast(float, pricing['input'])
+        p_out = cast(float, pricing['output'])
+        p_cache_w = cast(float, pricing.get('cache_write', 0.0))
+        p_cache_r = cast(float, pricing.get('cache_read', 0.0))
         cost = 0.0
-        cost += (token_usage.input_tokens / 1_000_000) * pricing['input']
-        cost += (token_usage.output_tokens / 1_000_000) * pricing['output']
-        cost += (token_usage.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
-        cost += (token_usage.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+        cost += (token_usage.input_tokens / 1_000_000) * p_in
+        cost += (token_usage.output_tokens / 1_000_000) * p_out
+        cost += (token_usage.cache_creation_input_tokens / 1_000_000) * p_cache_w
+        cost += (token_usage.cache_read_input_tokens / 1_000_000) * p_cache_r
         
         return cost
 
@@ -247,14 +252,14 @@ class ClaudeUsageAnalyzer:
     
     def calculate_cost(self, token_usage: TokenUsage, model: str) -> float:
         """Calculate estimated cost based on token usage and model."""
-        pricing_data = self.models_api.get_pricing()
+        pricing_data: Dict[str, Dict[str, Any]] = self.models_api.get_pricing()
         
         # Extract model name without provider prefix for pricing lookup
         model_for_pricing = model
         if '/' in model:
             model_for_pricing = model.split('/', 1)[1]
         
-        pricing = pricing_data.get(model_for_pricing)
+        pricing: Optional[Dict[str, Any]] = pricing_data.get(model_for_pricing)
         
         if pricing is None:
             # Try to find a default Claude model for fallback
@@ -277,11 +282,16 @@ class ClaudeUsageAnalyzer:
                 else:
                     raise RuntimeError(f"No pricing data available for model {model} and no Claude models found in API data")
         
+        assert pricing is not None
+        p_in = cast(float, pricing['input'])
+        p_out = cast(float, pricing['output'])
+        p_cache_w = cast(float, pricing.get('cache_write', 0.0))
+        p_cache_r = cast(float, pricing.get('cache_read', 0.0))
         cost = 0.0
-        cost += (token_usage.input_tokens / 1_000_000) * pricing['input']
-        cost += (token_usage.output_tokens / 1_000_000) * pricing['output']
-        cost += (token_usage.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
-        cost += (token_usage.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+        cost += (token_usage.input_tokens / 1_000_000) * p_in
+        cost += (token_usage.output_tokens / 1_000_000) * p_out
+        cost += (token_usage.cache_creation_input_tokens / 1_000_000) * p_cache_w
+        cost += (token_usage.cache_read_input_tokens / 1_000_000) * p_cache_r
         
         return cost
     
@@ -558,7 +568,7 @@ def calculate_alternative_model_cost(
     
     try:
         # Check if the specific model is available in pricing data
-        pricing_data = claude_analyzer.models_api.get_pricing()
+        pricing_data: Dict[str, Dict[str, Any]] = claude_analyzer.models_api.get_pricing()
         
         # Extract model name without provider prefix for pricing lookup
         model_for_pricing = alternative_model
@@ -578,22 +588,26 @@ def calculate_alternative_model_cost(
             total_usage.cache_read_input_tokens += usage.cache_read_input_tokens
         
         # Calculate cost using the specific model pricing
-        pricing = pricing_data[model_for_pricing]
+        pricing: Dict[str, Any] = pricing_data[model_for_pricing]
+        p_in = cast(float, pricing.get('input', 0.0))
+        p_out = cast(float, pricing.get('output', 0.0))
+        p_cache_w = cast(float, pricing.get('cache_write', p_in))
+        p_cache_r = cast(float, pricing.get('cache_read', p_in))
         cost = 0.0
         
         # Basic input/output tokens (all models have these)
-        cost += (total_usage.input_tokens / 1_000_000) * pricing['input']
-        cost += (total_usage.output_tokens / 1_000_000) * pricing['output']
+        cost += (total_usage.input_tokens / 1_000_000) * p_in
+        cost += (total_usage.output_tokens / 1_000_000) * p_out
         
         # Cache tokens (only Claude models typically have cache pricing)
         if 'cache_write' in pricing and 'cache_read' in pricing:
-            cost += (total_usage.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
-            cost += (total_usage.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+            cost += (total_usage.cache_creation_input_tokens / 1_000_000) * p_cache_w
+            cost += (total_usage.cache_read_input_tokens / 1_000_000) * p_cache_r
         else:
             # For non-Claude models, treat cache tokens as regular input tokens
             # since they don't have cache-specific pricing
-            cost += (total_usage.cache_creation_input_tokens / 1_000_000) * pricing['input']
-            cost += (total_usage.cache_read_input_tokens / 1_000_000) * pricing['input']
+            cost += (total_usage.cache_creation_input_tokens / 1_000_000) * p_in
+            cost += (total_usage.cache_read_input_tokens / 1_000_000) * p_in
         
         return cost
     except Exception as e:
@@ -1247,7 +1261,7 @@ def main() -> int:
             try:
                 # Make it quiet by default unless verbose is requested
                 opencode_quiet = args.quiet or not args.verbose
-                opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=opencode_quiet)
+                opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=opencode_quiet)  # type: ignore[name-defined]
                 
                 if os.path.exists(opencode_analyzer.projects_dir):
                     opencode_summaries = opencode_analyzer.analyze_all_sessions()
@@ -1298,13 +1312,13 @@ def main() -> int:
         
         # Add verbose option for detailed breakdowns if requested
         if hasattr(args, 'verbose') and args.verbose:
-            if claude_summaries and not args.opencode_only:
+            if claude_summaries and not args.opencode_only and claude_analyzer is not None:
                 filtered_claude = [s for s in claude_summaries if s in all_summaries]
                 if filtered_claude:
                     claude_analyzer._recent_count = args.recent
                     claude_analyzer.print_summary(filtered_claude)
             
-            if opencode_summaries and not args.claude_only:
+            if opencode_summaries and not args.claude_only and opencode_analyzer is not None:
                 filtered_opencode = [s for s in opencode_summaries if s in all_summaries]
                 if filtered_opencode:
                     opencode_analyzer._recent_count = args.recent
