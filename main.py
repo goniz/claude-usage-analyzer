@@ -351,10 +351,34 @@ class ClaudeUsageAnalyzer:
         print(f"  Total Messages: {total_messages:,}")
         
         print(f"\nTotal Token Usage:")
-        print(f"  Input Tokens:              {total_tokens.input_tokens:,}")
-        print(f"  Output Tokens:             {total_tokens.output_tokens:,}")
-        print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,}")
-        print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,}")
+        
+        # Calculate costs per token type
+        pricing_data = self.models_api.get_pricing()
+        default_model = 'claude-sonnet-4-20250514'
+        pricing = pricing_data.get(default_model)
+        if pricing is None:
+            # Find any available Claude model for pricing
+            available_models = [m for m in pricing_data.keys() if 'claude' in m.lower()]
+            if available_models:
+                default_model = available_models[0]
+                pricing = pricing_data[default_model]
+        
+        if pricing:
+            input_cost = (total_tokens.input_tokens / 1_000_000) * pricing['input']
+            output_cost = (total_tokens.output_tokens / 1_000_000) * pricing['output']
+            cache_creation_cost = (total_tokens.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
+            cache_read_cost = (total_tokens.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+            
+            print(f"  Input Tokens:              {total_tokens.input_tokens:,} (${input_cost:.4f})")
+            print(f"  Output Tokens:             {total_tokens.output_tokens:,} (${output_cost:.4f})")
+            print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,} (${cache_creation_cost:.4f})")
+            print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,} (${cache_read_cost:.4f})")
+        else:
+            print(f"  Input Tokens:              {total_tokens.input_tokens:,}")
+            print(f"  Output Tokens:             {total_tokens.output_tokens:,}")
+            print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,}")
+            print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,}")
+            
         print(f"  Total Tokens:              {total_tokens.input_tokens + total_tokens.output_tokens + total_tokens.cache_creation_input_tokens + total_tokens.cache_read_input_tokens:,}")
         
         print(f"\nEstimated Total Cost: ${total_cost:.2f}")
@@ -668,11 +692,36 @@ class OpenCodeUsageAnalyzer:
         print(f"  Total Messages: {total_messages:,}")
         
         print(f"\nTotal Token Usage:")
-        print(f"  Input Tokens:              {total_tokens.input_tokens:,}")
-        print(f"  Output Tokens:             {total_tokens.output_tokens:,}")
-        print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,}")
-        print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,}")
+        
+        # Calculate costs per token type using ModelsDotDev pricing
+        pricing_data = self.models_api.get_pricing()
+        default_model = 'claude-sonnet-4-20250514'
+        pricing = pricing_data.get(default_model)
+        if pricing is None:
+            # Find any available Claude model for pricing
+            available_models = [m for m in pricing_data.keys() if 'claude' in m.lower()]
+            if available_models:
+                default_model = available_models[0]
+                pricing = pricing_data[default_model]
+        
         total_all_tokens = total_tokens.input_tokens + total_tokens.output_tokens + total_tokens.cache_creation_input_tokens + total_tokens.cache_read_input_tokens
+        
+        if pricing:
+            input_cost = (total_tokens.input_tokens / 1_000_000) * pricing['input']
+            output_cost = (total_tokens.output_tokens / 1_000_000) * pricing['output']
+            cache_creation_cost = (total_tokens.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
+            cache_read_cost = (total_tokens.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+            
+            print(f"  Input Tokens:              {total_tokens.input_tokens:,} (${input_cost:.4f})")
+            print(f"  Output Tokens:             {total_tokens.output_tokens:,} (${output_cost:.4f})")
+            print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,} (${cache_creation_cost:.4f})")
+            print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,} (${cache_read_cost:.4f})")
+        else:
+            print(f"  Input Tokens:              {total_tokens.input_tokens:,}")
+            print(f"  Output Tokens:             {total_tokens.output_tokens:,}")
+            print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,}")
+            print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,}")
+            
         print(f"  Total Tokens:              {total_all_tokens:,}")
         
         print(f"\nTotal Cost: ${total_cost:.4f}")
@@ -1079,12 +1128,45 @@ def print_unified_summary(summaries: List[SessionSummary], recent_count: int = 1
             except Exception as e:
                 print(f"⚠️  Error comparing with {compare_model}: {str(e)}")
     
-    # Token breakdown (simplified)
+    # Token breakdown with costs (simplified)
     if total_tokens.cache_read_input_tokens > 0 or total_tokens.cache_creation_input_tokens > 0:
         print(f"\n📈 Token breakdown:")
-        print(f"   Input: {total_tokens.input_tokens:,} | Output: {total_tokens.output_tokens:,}")
-        if total_tokens.cache_read_input_tokens > 0:
-            print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read, {total_tokens.cache_creation_input_tokens:,} created")
+        
+        # Calculate costs per token type for the breakdown
+        if claude_analyzer:
+            try:
+                pricing_data = claude_analyzer.models_api.get_pricing()
+                default_model = 'claude-sonnet-4-20250514'
+                pricing = pricing_data.get(default_model)
+                if pricing is None:
+                    # Find any available Claude model for pricing
+                    available_models = [m for m in pricing_data.keys() if 'claude' in m.lower()]
+                    if available_models:
+                        default_model = available_models[0]
+                        pricing = pricing_data[default_model]
+                
+                if pricing:
+                    input_cost = (total_tokens.input_tokens / 1_000_000) * pricing['input']
+                    output_cost = (total_tokens.output_tokens / 1_000_000) * pricing['output']
+                    cache_creation_cost = (total_tokens.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
+                    cache_read_cost = (total_tokens.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+                    
+                    print(f"   Input: {total_tokens.input_tokens:,} (${input_cost:.4f}) | Output: {total_tokens.output_tokens:,} (${output_cost:.4f})")
+                    if total_tokens.cache_read_input_tokens > 0:
+                        print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read (${cache_read_cost:.4f}), {total_tokens.cache_creation_input_tokens:,} created (${cache_creation_cost:.4f})")
+                else:
+                    print(f"   Input: {total_tokens.input_tokens:,} | Output: {total_tokens.output_tokens:,}")
+                    if total_tokens.cache_read_input_tokens > 0:
+                        print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read, {total_tokens.cache_creation_input_tokens:,} created")
+            except:
+                # Fallback to basic display if pricing calculation fails
+                print(f"   Input: {total_tokens.input_tokens:,} | Output: {total_tokens.output_tokens:,}")
+                if total_tokens.cache_read_input_tokens > 0:
+                    print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read, {total_tokens.cache_creation_input_tokens:,} created")
+        else:
+            print(f"   Input: {total_tokens.input_tokens:,} | Output: {total_tokens.output_tokens:,}")
+            if total_tokens.cache_read_input_tokens > 0:
+                print(f"   Cache: {total_tokens.cache_read_input_tokens:,} read, {total_tokens.cache_creation_input_tokens:,} created")
     
     # Top projects (simplified)
     project_usage = defaultdict(int)
