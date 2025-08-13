@@ -52,9 +52,14 @@ class ModelsDotDev:
     
     def __init__(self, quiet: bool = False):
         self._quiet = quiet
+        self._pricing_cache = None
     
     def get_pricing(self) -> Dict:
         """Get pricing data from models.dev API."""
+        # Return cached data if available
+        if self._pricing_cache is not None:
+            return self._pricing_cache
+            
         try:
             response = requests.get(self.API_URL, timeout=10)
             response.raise_for_status()
@@ -97,6 +102,9 @@ class ModelsDotDev:
             
             if pricing and not self._quiet:
                 print(f"Fetched pricing for {len(pricing)} models from API")
+            
+            # Cache the result
+            self._pricing_cache = pricing
             return pricing
             
         except Exception as e:
@@ -567,6 +575,10 @@ class OpenCodeUsageAnalyzer:
         # Ensure OpenCode sessions are marked as such (set default provider if none found)
         if not summary.provider:
             summary.provider = "unknown"
+        
+        # Calculate and set the cost for this session
+        if summary.model:
+            summary.cost = self.calculate_cost(summary.token_usage, summary.model)
         
         return summary
     
