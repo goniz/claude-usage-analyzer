@@ -131,6 +131,41 @@ class ModelsDotDev:
             providers[provider_id]['count'] += 1
         
         return providers
+    
+    def calculate_cost(self, token_usage: TokenUsage, model: str) -> float:
+        """Calculate estimated cost based on token usage and model."""
+        pricing_data = self.get_pricing()
+        
+        pricing = pricing_data.get(model)
+        
+        if pricing is None:
+            # Try to find a default Claude model for fallback
+            default_models = ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022']
+            for default_model in default_models:
+                if default_model in pricing_data:
+                    pricing = pricing_data[default_model]
+                    if not self._quiet:
+                        print(f"Warning: No pricing found for {model}, using {default_model} pricing")
+                    break
+            
+            if pricing is None:
+                # Use any available Claude model as last resort
+                available_models = [m for m in pricing_data.keys() if 'claude' in m.lower()]
+                if available_models:
+                    fallback_model = available_models[0]
+                    pricing = pricing_data[fallback_model]
+                    if not self._quiet:
+                        print(f"Warning: No pricing found for {model}, using {fallback_model} pricing")
+                else:
+                    raise RuntimeError(f"No pricing data available for model {model} and no Claude models found in API data")
+        
+        cost = 0.0
+        cost += (token_usage.input_tokens / 1_000_000) * pricing['input']
+        cost += (token_usage.output_tokens / 1_000_000) * pricing['output']
+        cost += (token_usage.cache_creation_input_tokens / 1_000_000) * pricing['cache_write']
+        cost += (token_usage.cache_read_input_tokens / 1_000_000) * pricing['cache_read']
+        
+        return cost
 
 
 class ClaudeUsageAnalyzer:
@@ -418,6 +453,7 @@ class OpenCodeUsageAnalyzer:
         self.projects_dir = os.path.join(self.opencode_dir, 'project')
         self._quiet = quiet
         self._recent_count = 10
+        self.models_api = ModelsDotDev(quiet=quiet)
     
     def find_session_projects(self) -> List[str]:
         """Find all project directories containing session data."""
@@ -492,9 +528,7 @@ class OpenCodeUsageAnalyzer:
                                     summary.token_usage.cache_creation_input_tokens += cache_data.get('write', 0)
                                     summary.token_usage.cache_read_input_tokens += cache_data.get('read', 0)
                                 
-                                # Extract cost information (OpenCode provides cost directly)
-                                if 'cost' in msg_data:
-                                    summary.cost += msg_data['cost']
+                                # Note: We'll calculate cost using ModelsDotDev pricing instead of direct cost
                                 
                                 # Extract model and provider information
                                 if 'modelID' in msg_data and not summary.model:
@@ -536,6 +570,10 @@ class OpenCodeUsageAnalyzer:
         
         return summary
     
+    def calculate_cost(self, token_usage: TokenUsage, model: str) -> float:
+        """Calculate estimated cost based on token usage and model using ModelsDotDev pricing."""
+        return self.models_api.calculate_cost(token_usage, model)
+    
     def analyze_all_sessions(self) -> List[SessionSummary]:
         """Analyze all OpenCode session files and return summaries."""
         project_paths = self.find_session_projects()
@@ -571,7 +609,7 @@ class OpenCodeUsageAnalyzer:
         model_usage = defaultdict(TokenUsage)
         provider_usage = defaultdict(TokenUsage)
         project_usage = defaultdict(TokenUsage)
-        total_cost = sum(s.cost for s in summaries)
+        total_cost = 0.0
         model_costs = defaultdict(float)
         provider_costs = defaultdict(float)
         
@@ -582,13 +620,17 @@ class OpenCodeUsageAnalyzer:
             total_tokens.cache_creation_input_tokens += usage.cache_creation_input_tokens
             total_tokens.cache_read_input_tokens += usage.cache_read_input_tokens
             
+            # Calculate cost using ModelsDotDev pricing
+            session_cost = self.calculate_cost(usage, summary.model or 'claude-sonnet-4-20250514')
+            total_cost += session_cost
+            
             # Group by model
             model = summary.model or 'unknown'
             model_usage[model].input_tokens += usage.input_tokens
             model_usage[model].output_tokens += usage.output_tokens
             model_usage[model].cache_creation_input_tokens += usage.cache_creation_input_tokens
             model_usage[model].cache_read_input_tokens += usage.cache_read_input_tokens
-            model_costs[model] += summary.cost
+            model_costs[model] += session_cost
             
             # Group by provider
             provider = summary.provider or 'unknown'
@@ -596,7 +638,7 @@ class OpenCodeUsageAnalyzer:
             provider_usage[provider].output_tokens += usage.output_tokens
             provider_usage[provider].cache_creation_input_tokens += usage.cache_creation_input_tokens
             provider_usage[provider].cache_read_input_tokens += usage.cache_read_input_tokens
-            provider_costs[provider] += summary.cost
+            provider_costs[provider] += session_cost
             
             # Group by project
             project_usage[summary.project_path].input_tokens += usage.input_tokens
@@ -678,8 +720,9 @@ class OpenCodeUsageAnalyzer:
                                       session.token_usage.output_tokens + 
                                       session.token_usage.cache_creation_input_tokens + 
                                       session.token_usage.cache_read_input_tokens)
+                cost = self.calculate_cost(session.token_usage, session.model or 'claude-sonnet-4-20250514')
                 time_str = session.start_time.strftime('%Y-%m-%d %H:%M') if session.start_time else 'Unknown'
-                print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${session.cost:.4f})")
+                print(f"  {time_str} - {session.project_path}: {total_session_tokens:,} tokens (${cost:.4f})")
 
 
 def list_providers():
