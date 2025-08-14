@@ -181,6 +181,317 @@ class ModelsDotDev:
         return cost
 
 
+class OpenCodeUsageAnalyzer:
+    def __init__(self, opencode_dir: Optional[str] = None, quiet: bool = False):
+        self.opencode_dir = opencode_dir or os.path.expanduser('~/.local/share/opencode')
+        self.projects_dir = os.path.join(self.opencode_dir, 'project')
+        self._quiet = quiet
+        self._recent_count = 10
+        self.models_api = ModelsDotDev(quiet=quiet)
+
+    def find_session_projects(self) -> List[str]:
+        """Find all OpenCode project directories containing session data."""
+        if not os.path.exists(self.projects_dir):
+            return []
+        projects: List[str] = []
+        for item in os.listdir(self.projects_dir):
+            project_path = os.path.join(self.projects_dir, item)
+            if not os.path.isdir(project_path):
+                continue
+            session_info_dir = os.path.join(project_path, 'storage', 'session', 'info')
+            if os.path.exists(session_info_dir):
+                projects.append(project_path)
+        return projects
+
+    def find_session_files(self, project_path: str) -> List[str]:
+        """Find session info files in a project directory."""
+        session_info_dir = os.path.join(project_path, 'storage', 'session', 'info')
+        if not os.path.exists(session_info_dir):
+            return []
+        session_files: List[str] = []
+        for filename in os.listdir(session_info_dir):
+            if filename.startswith('ses_') and filename.endswith('.json'):
+                session_files.append(os.path.join(session_info_dir, filename))
+        return session_files
+
+    def parse_session_file(self, info_filepath: str, project_path: str) -> SessionSummary:
+        """Parse a single OpenCode session and extract usage information."""
+        session_id = os.path.basename(info_filepath).replace('.json', '')
+        project_name = os.path.basename(project_path)
+
+        summary = SessionSummary(
+            session_id=session_id,
+            project_path=project_name,
+        )
+
+        try:
+            with open(info_filepath, 'r', encoding='utf-8') as f:
+                info_data = json.load(f)
+
+            # Extract timestamps from info
+            time_data = info_data.get('time', {}) if isinstance(info_data, dict) else {}
+            try:
+                created = time_data.get('created')
+                if isinstance(created, (int, float)):
+                    summary.start_time = datetime.fromtimestamp(created / 1000).replace(tzinfo=None)
+                updated = time_data.get('updated')
+                if isinstance(updated, (int, float)):
+                    summary.end_time = datetime.fromtimestamp(updated / 1000).replace(tzinfo=None)
+            except Exception:
+                pass
+
+            # Find message files for this session
+            message_dir = os.path.join(project_path, 'storage', 'session', 'message', session_id)
+            if os.path.exists(message_dir):
+                for msg_filename in os.listdir(message_dir):
+                    if not (msg_filename.startswith('msg_') and msg_filename.endswith('.json')):
+                        continue
+                    msg_filepath = os.path.join(message_dir, msg_filename)
+                    try:
+                        with open(msg_filepath, 'r', encoding='utf-8') as fmsg:
+                            msg_data = json.load(fmsg)
+
+                        # Count any message file
+                        summary.messages_count += 1
+
+                        # Consider assistant messages for usage/model/provider
+                        role = msg_data.get('role')
+                        if role == 'assistant':
+                            tokens = msg_data.get('tokens', {})
+                            if isinstance(tokens, dict):
+                                summary.token_usage.input_tokens += int(tokens.get('input', 0) or 0)
+                                summary.token_usage.output_tokens += int(tokens.get('output', 0) or 0)
+                                cache_data = tokens.get('cache', {}) if isinstance(tokens.get('cache', {}), dict) else {}
+                                summary.token_usage.cache_creation_input_tokens += int(cache_data.get('write', 0) or 0)
+                                summary.token_usage.cache_read_input_tokens += int(cache_data.get('read', 0) or 0)
+
+                            # Model and provider
+                            model_id = msg_data.get('modelID')
+                            provider_id = msg_data.get('providerID')
+                            if provider_id and not summary.provider:
+                                summary.provider = str(provider_id)
+                            if model_id and not summary.model:
+                                if provider_id:
+                                    summary.model = f"{provider_id}/{model_id}"
+                                else:
+                                    summary.model = str(model_id)
+
+                            # Timestamps within message
+                            mtime = msg_data.get('time', {}) if isinstance(msg_data.get('time', {}), dict) else {}
+                            try:
+                                created = mtime.get('created')
+                                if isinstance(created, (int, float)):
+                                    ts = datetime.fromtimestamp(created / 1000).replace(tzinfo=None)
+                                    if summary.start_time is None or ts < summary.start_time:
+                                        summary.start_time = ts
+                                completed = mtime.get('completed')
+                                if isinstance(completed, (int, float)):
+                                    ts = datetime.fromtimestamp(completed / 1000).replace(tzinfo=None)
+                                    if summary.end_time is None or ts > summary.end_time:
+                                        summary.end_time = ts
+                            except Exception:
+                                pass
+
+                    except (json.JSONDecodeError, KeyError) as e:
+                        if not self._quiet:
+                            print(f"Warning: Error parsing message file {msg_filepath}: {e}")
+                        continue
+                    except Exception as e:
+                        if not self._quiet:
+                            print(f"Warning: Unexpected error reading {msg_filepath}: {e}")
+                        continue
+
+        except Exception as e:
+            if not self._quiet:
+                print(f"Error reading session info {info_filepath}: {e}")
+
+        # Ensure provider marked at least as unknown
+        if not summary.provider:
+            summary.provider = 'unknown'
+
+        # Compute cost using pricing
+        try:
+            if summary.model:
+                summary.cost = self.calculate_cost(summary.token_usage, summary.model)
+        except Exception:
+            summary.cost = 0.0
+
+        return summary
+
+    def calculate_cost(self, token_usage: TokenUsage, model: str) -> float:
+        """Calculate estimated cost using ModelsDotDev pricing with model normalization."""
+        pricing_data: Dict[str, Dict[str, Any]] = self.models_api.get_pricing()
+
+        # Normalize: strip known prefixes and nested prefixes
+        model_for_pricing = model
+        for prefix in ('anthropic/', 'openrouter/', 'openai/', 'groq/'):
+            if model_for_pricing.startswith(prefix):
+                model_for_pricing = model_for_pricing[len(prefix):]
+        if '/' in model_for_pricing:
+            model_for_pricing = model_for_pricing.split('/')[-1]
+
+        pricing = pricing_data.get(model_for_pricing)
+        if pricing is None:
+            # Fallback like Claude analyzer
+            default_models = ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022']
+            for default_model in default_models:
+                if default_model in pricing_data:
+                    pricing = pricing_data[default_model]
+                    if not self._quiet:
+                        print(f"Warning: No pricing found for {model}, using {default_model} pricing")
+                    break
+        if pricing is None:
+            # Last resort
+            available = [m for m in pricing_data.keys()]
+            if not available:
+                return 0.0
+            pricing = pricing_data[available[0]]
+
+        p_in = cast(float, pricing.get('input', pricing.get('prompt', 0.0)))
+        p_out = cast(float, pricing.get('output', pricing.get('completion', 0.0)))
+        p_cache_w = cast(float, pricing.get('cache_write', p_in))
+        p_cache_r = cast(float, pricing.get('cache_read', p_in))
+
+        cost = 0.0
+        cost += (token_usage.input_tokens / 1_000_000) * p_in
+        cost += (token_usage.output_tokens / 1_000_000) * p_out
+        cost += (token_usage.cache_creation_input_tokens / 1_000_000) * p_cache_w
+        cost += (token_usage.cache_read_input_tokens / 1_000_000) * p_cache_r
+        return float(cost)
+
+    def analyze_all_sessions(self) -> List[SessionSummary]:
+        projects = self.find_session_projects()
+        summaries: List[SessionSummary] = []
+        if not self._quiet:
+            print(f"Found {len(projects)} OpenCode projects to analyze...")
+        for project_path in projects:
+            session_files = self.find_session_files(project_path)
+            if not self._quiet and session_files:
+                print(f"  {os.path.basename(project_path)}: {len(session_files)} sessions")
+            for fp in session_files:
+                summaries.append(self.parse_session_file(fp, project_path))
+        return summaries
+
+    def print_summary(self, summaries: List[SessionSummary]) -> None:
+        """Print a comprehensive summary of OpenCode token usage and costs."""
+        if not summaries:
+            print("No OpenCode session data found.")
+            return
+
+        total_sessions = len(summaries)
+        total_messages = sum(s.messages_count for s in summaries)
+
+        total_tokens = TokenUsage()
+        model_usage: Dict[str, TokenUsage] = defaultdict(TokenUsage)
+        provider_usage: Dict[str, TokenUsage] = defaultdict(TokenUsage)
+        project_usage: Dict[str, TokenUsage] = defaultdict(TokenUsage)
+        total_cost = sum(s.cost for s in summaries)
+        model_costs: Dict[str, float] = defaultdict(float)
+        provider_costs: Dict[str, float] = defaultdict(float)
+
+        for s in summaries:
+            u = s.token_usage
+            total_tokens.input_tokens += u.input_tokens
+            total_tokens.output_tokens += u.output_tokens
+            total_tokens.cache_creation_input_tokens += u.cache_creation_input_tokens
+            total_tokens.cache_read_input_tokens += u.cache_read_input_tokens
+
+            model = s.model or 'unknown'
+            model_usage[model].input_tokens += u.input_tokens
+            model_usage[model].output_tokens += u.output_tokens
+            model_usage[model].cache_creation_input_tokens += u.cache_creation_input_tokens
+            model_usage[model].cache_read_input_tokens += u.cache_read_input_tokens
+            model_costs[model] += s.cost
+
+            provider = s.provider or 'unknown'
+            provider_usage[provider].input_tokens += u.input_tokens
+            provider_usage[provider].output_tokens += u.output_tokens
+            provider_usage[provider].cache_creation_input_tokens += u.cache_creation_input_tokens
+            provider_usage[provider].cache_read_input_tokens += u.cache_read_input_tokens
+            provider_costs[provider] += s.cost
+
+            project = os.path.basename(s.project_path)
+            project_usage[project].input_tokens += u.input_tokens
+            project_usage[project].output_tokens += u.output_tokens
+            project_usage[project].cache_creation_input_tokens += u.cache_creation_input_tokens
+            project_usage[project].cache_read_input_tokens += u.cache_read_input_tokens
+
+        print("\n" + "=" * 80)
+        print("OPENCODE USAGE SUMMARY")
+        print("=" * 80)
+
+        print(f"\nOverall Statistics:")
+        print(f"  Total Sessions: {total_sessions:,}")
+        print(f"  Total Messages: {total_messages:,}")
+
+        print(f"\nTotal Token Usage:")
+        print(f"  Input Tokens:              {total_tokens.input_tokens:,}")
+        print(f"  Output Tokens:             {total_tokens.output_tokens:,}")
+        print(f"  Cache Creation Tokens:     {total_tokens.cache_creation_input_tokens:,}")
+        print(f"  Cache Read Tokens:         {total_tokens.cache_read_input_tokens:,}")
+        print(f"  Total Tokens:              {total_tokens.input_tokens + total_tokens.output_tokens + total_tokens.cache_creation_input_tokens + total_tokens.cache_read_input_tokens:,}")
+
+        print(f"\nEstimated Total Cost: ${total_cost:.2f}")
+
+        sessions_with_time = [s for s in summaries if s.start_time is not None]
+        if sessions_with_time:
+            times = [cast(datetime, s.start_time) for s in sessions_with_time]
+            earliest_date = min(times).date()
+            latest_date = max(times).date()
+            total_days = (latest_date - earliest_date).days + 1
+
+            avg_daily_cost = total_cost / total_days if total_days > 0 else 0
+            avg_weekly_cost = avg_daily_cost * 7
+            avg_monthly_cost = avg_daily_cost * 30.44
+
+            print(f"\nCost Averages:")
+            print(f"  Date Range: {earliest_date} to {latest_date} ({total_days} days)")
+            print(f"  Average Daily Cost: ${avg_daily_cost:.4f}")
+            print(f"  Average Weekly Cost: ${avg_weekly_cost:.2f}")
+            print(f"  Average Monthly Cost: ${avg_monthly_cost:.2f}")
+
+        # Provider breakdown
+        if len(provider_usage) > 1:
+            print(f"\nUsage by Provider:")
+            for provider, u in sorted(provider_usage.items()):
+                cost = provider_costs[provider]
+                print(f"  {provider}:")
+                print(f"    Input: {u.input_tokens:,}, Output: {u.output_tokens:,}")
+                if u.cache_creation_input_tokens or u.cache_read_input_tokens:
+                    print(f"    Cache Write: {u.cache_creation_input_tokens:,}, Cache Read: {u.cache_read_input_tokens:,}")
+                print(f"    Total Cost: ${cost:.4f}")
+
+        # Model breakdown
+        if len(model_usage) > 1:
+            print(f"\nUsage by Model:")
+            for model, u in sorted(model_usage.items()):
+                cost = model_costs[model]
+                print(f"  {model}:")
+                print(f"    Input: {u.input_tokens:,}, Output: {u.output_tokens:,}")
+                if u.cache_creation_input_tokens or u.cache_read_input_tokens:
+                    print(f"    Cache Write: {u.cache_creation_input_tokens:,}, Cache Read: {u.cache_read_input_tokens:,}")
+                print(f"    Total Cost: ${cost:.4f}")
+
+        # Project breakdown
+        if len(project_usage) > 1:
+            print(f"\nUsage by Project:")
+            for project, u in sorted(project_usage.items(), key=lambda x: x[1].input_tokens + x[1].output_tokens, reverse=True):
+                total_project_tokens = u.input_tokens + u.output_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens
+                print(f"  {project}: {total_project_tokens:,} total tokens")
+
+        # Recent sessions
+        if sessions_with_time:
+            recent_sessions = sorted(sessions_with_time, key=lambda x: cast(datetime, x.start_time), reverse=True)[:self._recent_count]
+            if recent_sessions:
+                print(f"\nRecent Sessions (Last {min(self._recent_count, len(recent_sessions))}):")
+                for session in recent_sessions:
+                    total_session_tokens = (
+                        session.token_usage.input_tokens + session.token_usage.output_tokens +
+                        session.token_usage.cache_creation_input_tokens + session.token_usage.cache_read_input_tokens
+                    )
+                    time_str = session.start_time.strftime('%Y-%m-%d %H:%M') if session.start_time else 'Unknown'
+                    print(f"  {time_str} - {os.path.basename(session.project_path)}: {total_session_tokens:,} tokens (${session.cost:.4f})")
+
 class ClaudeUsageAnalyzer:
     def __init__(self, claude_dir: Optional[str] = None, quiet: bool = False):
         self.claude_dir = claude_dir or os.path.expanduser('~/.claude')
