@@ -27,15 +27,15 @@
   - [ ] Optional: write-through disk cache at `~/.cache/claude-usage-analyzer/pricing.json` with timestamp
   - [x] Definition of done: subsequent runs within TTL do not hit the network; `--no-cache` forces refresh
 
-- [ ] Network resilience for models.dev
-  - [ ] Add retries with backoff (e.g., 3 attempts, 250ms * 2^n) and a descriptive User-Agent header
-  - [ ] Validate schema defensively (missing keys, types) and fail gracefully with a clear message when `--quiet` is not set
-  - [ ] Definition of done: transient network errors do not crash the tool; clear messages appear when appropriate
+- [x] Network resilience for models.dev
+  - [x] Add retries with backoff (e.g., 3 attempts, 250ms * 2^n) and a descriptive User-Agent header
+  - [x] Validate schema defensively (missing keys, types) and fail gracefully with a clear message when `--quiet` is not set
+  - [x] Definition of done: transient network errors do not crash the tool; clear messages appear when appropriate
 
 ### P1 — Output and UX
-- [ ] Add `--json` output mode
-  - [ ] Emit a machine-readable unified summary to stdout when `--json` is passed
-  - [ ] Minimal schema (example):
+- [x] Add `--json` output mode
+  - [x] Emit a machine-readable unified summary to stdout when `--json` is passed
+  - [x] Minimal schema (example):
     ```json
     {
       "sessions": <int>,
@@ -47,7 +47,7 @@
       "recent": [{"ts": "YYYY-MM-DDTHH:MM:SS", "project": "name", "tokens": <int>, "source": "claude|opencode"}]
     }
     ```
-  - [ ] Definition of done: `uv run main.py --json` prints only JSON; no extra text
+  - [x] Definition of done: `uv run main.py --json` prints only JSON; no extra text
 
 - [ ] Project name display controls
   - [ ] Already switched to `os.path.basename`; add `--full-paths` flag to display full paths (with `$HOME` collapsed to `~`)

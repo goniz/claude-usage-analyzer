@@ -84,7 +84,7 @@ class ModelsDotDev:
         self._cache_timestamp: Optional[float] = None
     
     def get_pricing(self) -> Dict[str, Dict[str, Any]]:
-        """Get pricing data from models.dev API."""
+        """Get pricing data from models.dev API with retries and error handling."""
         # Check if we should use cached data
         current_time = time.time()
         cache_is_valid = (
@@ -97,56 +97,113 @@ class ModelsDotDev:
         if cache_is_valid:
             return self._pricing_cache
             
-        try:
-            response = requests.get(self.API_URL, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+        # Attempt API call with retries
+        max_retries = 3
+        base_delay = 0.25  # 250ms
+        
+        for attempt in range(max_retries):
+            try:
+                headers = {
+                    'User-Agent': 'claude-usage-analyzer/1.0 (Python requests; +https://github.com/goniz/claude-usage-analyzer)'
+                }
+                response = requests.get(self.API_URL, headers=headers, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Validate response structure
+                if not isinstance(data, dict):
+                    raise ValueError("API response is not a dictionary")
+                
+                break  # Success, exit retry loop
+                
+            except requests.exceptions.RequestException as e:
+                is_last_attempt = attempt == max_retries - 1
+                if is_last_attempt:
+                    raise RuntimeError(f"Failed to fetch pricing from models.dev API after {max_retries} attempts: {e}")
+                
+                # Exponential backoff: 250ms, 500ms, 1000ms
+                delay = base_delay * (2 ** attempt)
+                if not self._quiet:
+                    print(f"Warning: API request failed (attempt {attempt + 1}/{max_retries}), retrying in {delay:.0f}ms...")
+                time.sleep(delay)
+                continue
+                
+            except (json.JSONDecodeError, ValueError) as e:
+                raise RuntimeError(f"Failed to parse pricing data from models.dev API: {e}")
+            except Exception as e:
+                raise RuntimeError(f"Unexpected error fetching pricing from models.dev API: {e}")
             
-            # Transform API data to our pricing format with provider info
-            pricing: Dict[str, Dict[str, Any]] = {}
+        # Transform API data to our pricing format with provider info
+        pricing: Dict[str, Dict[str, Any]] = {}
+        
+        # Iterate through all provider sections
+        for provider_id, provider_data in data.items():
+            if not isinstance(provider_data, dict):
+                if not self._quiet:
+                    print(f"Warning: Skipping non-dict provider data for '{provider_id}'")
+                continue
+                
+            # Get provider display name, fallback to ID
+            provider_name = provider_data.get('name', provider_id)
+            models_data = provider_data.get('models', {})
             
-            # Iterate through all provider sections
-            for provider_id, provider_data in data.items():
-                if not isinstance(provider_data, dict):
+            if not isinstance(models_data, dict):
+                if not self._quiet:
+                    print(f"Warning: Skipping provider '{provider_id}' - models data is not a dictionary")
+                continue
+                
+            for model_id, model_data in models_data.items():
+                if not isinstance(model_data, dict):
                     continue
                     
-                # Get provider display name, fallback to ID
-                provider_name = provider_data.get('name', provider_id)
-                models_data = provider_data.get('models', {})
+                cost_data = model_data.get('cost', {})
                 
-                if isinstance(models_data, dict):
-                    for model_id, model_data in models_data.items():
-                        if not isinstance(model_data, dict):
-                            continue
-                            
-                        cost_data = model_data.get('cost', {})
+                if not isinstance(cost_data, dict):
+                    continue
+                
+                if model_id and cost_data:
+                    try:
+                        input_price = cost_data.get('input')
+                        output_price = cost_data.get('output')
+                        cache_write_price = cost_data.get('cache_write')
+                        cache_read_price = cost_data.get('cache_read')
                         
-                        if model_id and cost_data:
-                            input_price = cost_data.get('input')
-                            output_price = cost_data.get('output')
-                            cache_write_price = cost_data.get('cache_write')
-                            cache_read_price = cost_data.get('cache_read')
+                        # Validate that we have the required pricing fields
+                        if (input_price is not None and output_price is not None and
+                            isinstance(input_price, (int, float)) and isinstance(output_price, (int, float))):
                             
-                            if input_price is not None and output_price is not None:
-                                pricing[model_id] = {
-                                    'input': input_price,
-                                    'output': output_price,
-                                    'cache_write': cache_write_price if cache_write_price is not None else 0,
-                                    'cache_read': cache_read_price if cache_read_price is not None else 0,
-                                    'provider_id': provider_id,
-                                    'provider_name': provider_name,
-                                }
+                            # Validate optional cache pricing fields
+                            cache_write_validated = 0.0
+                            cache_read_validated = 0.0
+                            
+                            if cache_write_price is not None and isinstance(cache_write_price, (int, float)):
+                                cache_write_validated = float(cache_write_price)
+                            if cache_read_price is not None and isinstance(cache_read_price, (int, float)):
+                                cache_read_validated = float(cache_read_price)
+                                
+                            pricing[model_id] = {
+                                'input': float(input_price),
+                                'output': float(output_price),
+                                'cache_write': cache_write_validated,
+                                'cache_read': cache_read_validated,
+                                'provider_id': str(provider_id),
+                                'provider_name': str(provider_name),
+                            }
+                    except (TypeError, ValueError) as e:
+                        if not self._quiet:
+                            print(f"Warning: Skipping model '{model_id}' due to invalid pricing data: {e}")
+                        continue
+        
+        if not pricing:
+            raise RuntimeError("No valid pricing data found in API response - the API may have changed format")
             
-            if pricing and not self._quiet:
-                print(f"Fetched pricing for {len(pricing)} models from API")
-            
-            # Cache the result with timestamp
-            self._pricing_cache = pricing
-            self._cache_timestamp = current_time
-            return pricing
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to fetch pricing from models.dev API: {e}")
+        if not self._quiet:
+            print(f"Fetched pricing for {len(pricing)} models from API")
+        
+        # Cache the result with timestamp
+        self._pricing_cache = pricing
+        self._cache_timestamp = current_time
+        return pricing
     
     def get_providers_and_models(self) -> Dict:
         """Get organized provider and model data from models.dev API."""
@@ -1433,6 +1490,129 @@ def print_unified_summary(
     print()
 
 
+def generate_json_summary(
+    summaries: List[SessionSummary],
+    claude_analyzer: Optional["ClaudeUsageAnalyzer"] = None,
+    recent_count: int = 10
+) -> Dict[str, Any]:
+    """Generate a machine-readable JSON summary of session data."""
+    if not summaries:
+        return {
+            "sessions": 0,
+            "messages": 0,
+            "tokens": {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0},
+            "cost": {"total": 0.0, "claude": 0.0, "opencode": 0.0},
+            "by_model": [],
+            "by_project": [],
+            "recent": []
+        }
+    
+    # Separate by source
+    claude_summaries = [s for s in summaries if not s.provider]
+    opencode_summaries = [s for s in summaries if s.provider]
+    
+    # Calculate stats
+    total_sessions = len(summaries)
+    total_messages = sum(s.messages_count for s in summaries)
+    
+    # Aggregate token usage
+    total_tokens = TokenUsage()
+    for summary in summaries:
+        usage = summary.token_usage
+        total_tokens.input_tokens += usage.input_tokens
+        total_tokens.output_tokens += usage.output_tokens
+        total_tokens.cache_creation_input_tokens += usage.cache_creation_input_tokens
+        total_tokens.cache_read_input_tokens += usage.cache_read_input_tokens
+    
+    # Calculate costs
+    opencode_cost = sum(s.cost for s in opencode_summaries)
+    claude_cost = 0.0
+    if claude_summaries and claude_analyzer:
+        try:
+            claude_total_usage = TokenUsage()
+            for s in claude_summaries:
+                claude_total_usage.input_tokens += s.token_usage.input_tokens
+                claude_total_usage.output_tokens += s.token_usage.output_tokens
+                claude_total_usage.cache_creation_input_tokens += s.token_usage.cache_creation_input_tokens
+                claude_total_usage.cache_read_input_tokens += s.token_usage.cache_read_input_tokens
+            claude_cost = claude_analyzer.calculate_cost(claude_total_usage, 'anthropic/claude-sonnet-4-20250514')
+        except:
+            claude_cost = 0.0
+    
+    total_cost = claude_cost + opencode_cost
+    
+    # By model breakdown
+    model_usage: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
+    for summary in summaries:
+        model = summary.model or 'unknown'
+        usage = summary.token_usage
+        total_session_tokens = (usage.input_tokens + usage.output_tokens + 
+                               usage.cache_creation_input_tokens + usage.cache_read_input_tokens)
+        model_usage[model]["tokens"] += total_session_tokens
+        
+        # Add cost (either from opencode or calculate for claude)
+        if summary.provider:  # OpenCode
+            model_usage[model]["cost"] += summary.cost
+        elif claude_analyzer:  # Claude Code
+            try:
+                session_cost = claude_analyzer.calculate_cost(usage, model)
+                model_usage[model]["cost"] += session_cost
+            except:
+                pass
+    
+    by_model = [{"model": model, "tokens": data["tokens"], "cost": data["cost"]} 
+                for model, data in sorted(model_usage.items())]
+    
+    # By project breakdown
+    project_usage: Dict[str, int] = defaultdict(int)
+    for summary in summaries:
+        project_name = os.path.basename(summary.project_path)
+        usage = summary.token_usage
+        project_tokens = (usage.input_tokens + usage.output_tokens + 
+                         usage.cache_creation_input_tokens + usage.cache_read_input_tokens)
+        project_usage[project_name] += project_tokens
+    
+    by_project = [{"project": project, "tokens": tokens} 
+                  for project, tokens in sorted(project_usage.items(), key=lambda x: x[1], reverse=True)]
+    
+    # Recent sessions
+    sessions_with_time = [s for s in summaries if s.start_time is not None]
+    recent_sessions = sorted(sessions_with_time, 
+                           key=lambda x: cast(datetime, x.start_time), reverse=True)[:recent_count]
+    
+    recent = []
+    for session in recent_sessions:
+        usage = session.token_usage
+        total_session_tokens = (usage.input_tokens + usage.output_tokens + 
+                               usage.cache_creation_input_tokens + usage.cache_read_input_tokens)
+        
+        recent.append({
+            "ts": session.start_time.isoformat() if session.start_time else None,
+            "project": os.path.basename(session.project_path),
+            "tokens": total_session_tokens,
+            "source": "opencode" if session.provider else "claude"
+        })
+    
+    return {
+        "sessions": total_sessions,
+        "messages": total_messages,
+        "tokens": {
+            "input": total_tokens.input_tokens,
+            "output": total_tokens.output_tokens,
+            "cache_create": total_tokens.cache_creation_input_tokens,
+            "cache_read": total_tokens.cache_read_input_tokens
+        },
+        "cost": {
+            "total": total_cost,
+            "claude": claude_cost,
+            "opencode": opencode_cost
+        },
+        "by_model": by_model,
+        "by_project": by_project,
+        "recent": recent
+    }
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create and configure the argument parser."""
     parser = argparse.ArgumentParser(
@@ -1447,6 +1627,7 @@ Examples:
   %(prog)s --recent 5                   # Show only last 5 recent sessions
   %(prog)s --project my-project         # Filter by specific project
   %(prog)s --model claude-sonnet-4      # Filter by specific model
+  %(prog)s --json                       # Output machine-readable JSON summary
   %(prog)s --compare-model anthropic/claude-3-5-haiku-20241022  # Compare costs with alternative model
   %(prog)s --list-providers             # List all available providers
   %(prog)s --list-models anthropic      # List all models for anthropic provider
@@ -1538,6 +1719,12 @@ Examples:
         help='List models for a specific provider (e.g., anthropic, openai, groq) and exit'
     )
     
+    parser.add_argument(
+        '--json',
+        action='store_true',
+        help='Output machine-readable JSON summary to stdout (no other text)'
+    )
+    
     return parser
 
 
@@ -1567,8 +1754,8 @@ def main() -> int:
         # Analyze Claude Code sessions unless --opencode-only is specified
         if not args.opencode_only:
             try:
-                # Make it quiet by default unless verbose is requested
-                claude_quiet = args.quiet or not args.verbose
+                # Make it quiet by default unless verbose is requested, and always quiet for JSON mode
+                claude_quiet = args.quiet or not args.verbose or args.json
                 claude_analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=claude_quiet, bypass_cache=args.no_cache)
                 
                 if os.path.exists(claude_analyzer.projects_dir):
@@ -1577,7 +1764,7 @@ def main() -> int:
                 elif args.verbose:
                     print(f"Claude Code projects directory not found at {claude_analyzer.projects_dir}")
             except Exception as e:
-                if not args.quiet:
+                if not args.quiet and not args.json:
                     print(f"Error analyzing Claude Code sessions: {e}")
                 if args.claude_only:
                     return 1
@@ -1585,8 +1772,8 @@ def main() -> int:
         # Analyze OpenCode sessions unless --claude-only is specified
         if not args.claude_only:
             try:
-                # Make it quiet by default unless verbose is requested
-                opencode_quiet = args.quiet or not args.verbose
+                # Make it quiet by default unless verbose is requested, and always quiet for JSON mode
+                opencode_quiet = args.quiet or not args.verbose or args.json
                 opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=opencode_quiet, bypass_cache=args.no_cache)  # type: ignore[name-defined]
                 
                 if os.path.exists(opencode_analyzer.projects_dir):
@@ -1595,7 +1782,7 @@ def main() -> int:
                 elif args.verbose:
                     print(f"OpenCode projects directory not found at {opencode_analyzer.projects_dir}")
             except Exception as e:
-                if not args.quiet:
+                if not args.quiet and not args.json:
                     print(f"Error analyzing OpenCode sessions: {e}")
                 if args.opencode_only:
                     return 1
@@ -1610,18 +1797,25 @@ def main() -> int:
         if args.project:
             all_summaries = [s for s in all_summaries if args.project.lower() in s.project_path.lower()]
             if not all_summaries:
-                print(f"No sessions found for project '{args.project}'")
+                if not args.json:
+                    print(f"No sessions found for project '{args.project}'")
                 return 0
         
         if args.model:
             all_summaries = [s for s in all_summaries if args.model.lower() in s.model.lower()]
             if not all_summaries:
-                print(f"No sessions found for model '{args.model}'")
+                if not args.json:
+                    print(f"No sessions found for model '{args.model}'")
                 return 0
         
         # Print unified summary
         if not all_summaries:
-            print("No session data found.")
+            if args.json:
+                # Output empty JSON structure for --json mode
+                json_output = generate_json_summary([], None, args.recent)
+                print(json.dumps(json_output, indent=2))
+            else:
+                print("No session data found.")
             return 0
         
         # Always use the unified summary for a cleaner experience
@@ -1629,15 +1823,19 @@ def main() -> int:
         if claude_summaries and not args.opencode_only:
             analyzer_for_cost = claude_analyzer
         
-        if args.compare_model:
+        if args.json:
+            # Output JSON format
+            json_output = generate_json_summary(all_summaries, analyzer_for_cost, args.recent)
+            print(json.dumps(json_output, indent=2))
+        elif args.compare_model:
             # Show dedicated comparison summary for model comparison
             print_dedicated_comparison_summary(all_summaries, args.compare_model, analyzer_for_cost)
         else:
             # Show regular unified summary
             print_unified_summary(all_summaries, args.recent, analyzer_for_cost, args.compare_model)
         
-        # Add verbose option for detailed breakdowns if requested
-        if hasattr(args, 'verbose') and args.verbose:
+        # Add verbose option for detailed breakdowns if requested (not in JSON mode)
+        if hasattr(args, 'verbose') and args.verbose and not args.json:
             if claude_summaries and not args.opencode_only and claude_analyzer is not None:
                 filtered_claude = [s for s in claude_summaries if s in all_summaries]
                 if filtered_claude:
@@ -1651,12 +1849,12 @@ def main() -> int:
                     opencode_analyzer.print_summary(filtered_opencode)
         
     except RuntimeError as e:
-        if not args.quiet:
+        if not args.quiet and not args.json:
             print(f"Error: {e}")
             print("Make sure you have internet connectivity to fetch pricing data from models.dev")
         return 1
     except Exception as e:
-        if not args.quiet:
+        if not args.quiet and not args.json:
             print(f"Unexpected error: {e}")
         return 1
     return 0
