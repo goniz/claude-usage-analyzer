@@ -10,22 +10,22 @@
   - [x] Add `print_summary` for OpenCode (provider/model/project breakdowns)
   - [x] Definition of done: `uv run main.py` runs without NameError and shows OpenCode stats (sessions, tokens, provider/model breakdowns) when data exists
 
-- [ ] Fix cost reporting in unified summary
-  - [ ] Ensure OpenCode sessions have `summary.cost` set by the analyzer
-  - [ ] Verify `print_unified_summary` uses actual OpenCode costs (no implicit zeros)
-  - [ ] Definition of done: unified summary shows a non-zero OpenCode cost when OpenCode usage exists
+- [x] Fix cost reporting in unified summary
+  - [x] Ensure OpenCode sessions have `summary.cost` set by the analyzer
+  - [x] Verify `print_unified_summary` uses actual OpenCode costs (no implicit zeros)
+  - [x] Definition of done: unified summary shows a non-zero OpenCode cost when OpenCode usage exists
 
-- [ ] Centralize model ID normalization for pricing lookups
-  - [ ] Add a helper (e.g., `normalize_model_id_for_pricing(model: str) -> str`) that strips prefixes (`anthropic/`, `openrouter/`, `openai/`, `groq/`) and nested prefixes (`openrouter/openai/gpt-4o-mini` → `gpt-4o-mini`)
-  - [ ] Use it in: Claude cost calc, OpenCode cost calc, comparison summary, token-cost breakdowns
-  - [ ] Definition of done: pricing lookups succeed for prefixed and nested-prefixed model IDs
+- [x] Centralize model ID normalization for pricing lookups
+  - [x] Add a helper (e.g., `normalize_model_id_for_pricing(model: str) -> str`) that strips prefixes (`anthropic/`, `openrouter/`, `openai/`, `groq/`) and nested prefixes (`openrouter/openai/gpt-4o-mini` → `gpt-4o-mini`)
+  - [x] Use it in: Claude cost calc, OpenCode cost calc, comparison summary, token-cost breakdowns
+  - [x] Definition of done: pricing lookups succeed for prefixed and nested-prefixed model IDs
 
 ### P1 — Pricing, caching, and resilience
-- [ ] Pricing cache TTL and bypass flag
-  - [ ] Add TTL (e.g., 1 hour) to `ModelsDotDev.get_pricing()` in-memory cache
-  - [ ] Support `--no-cache` to bypass the cache and refresh once
+- [x] Pricing cache TTL and bypass flag
+  - [x] Add TTL (e.g., 1 hour) to `ModelsDotDev.get_pricing()` in-memory cache
+  - [x] Support `--no-cache` to bypass the cache and refresh once
   - [ ] Optional: write-through disk cache at `~/.cache/claude-usage-analyzer/pricing.json` with timestamp
-  - [ ] Definition of done: subsequent runs within TTL do not hit the network; `--no-cache` forces refresh
+  - [x] Definition of done: subsequent runs within TTL do not hit the network; `--no-cache` forces refresh
 
 - [ ] Network resilience for models.dev
   - [ ] Add retries with backoff (e.g., 3 attempts, 250ms * 2^n) and a descriptive User-Agent header

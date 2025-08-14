@@ -19,6 +19,30 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, cast
 
 
+def normalize_model_id_for_pricing(model: str) -> str:
+    """
+    Normalize model ID for pricing lookups by stripping provider prefixes and nested prefixes.
+    
+    Examples:
+        - 'anthropic/claude-sonnet-4' -> 'claude-sonnet-4'
+        - 'openrouter/openai/gpt-4o-mini' -> 'gpt-4o-mini'
+        - 'groq/mixtral-8x7b' -> 'mixtral-8x7b'
+        - 'claude-sonnet-4' -> 'claude-sonnet-4' (unchanged)
+    """
+    model_for_pricing = model
+    
+    # Strip known provider prefixes
+    for prefix in ('anthropic/', 'openrouter/', 'openai/', 'groq/'):
+        if model_for_pricing.startswith(prefix):
+            model_for_pricing = model_for_pricing[len(prefix):]
+    
+    # Handle nested prefixes like 'openrouter/openai/gpt-4o-mini'
+    if '/' in model_for_pricing:
+        model_for_pricing = model_for_pricing.split('/')[-1]
+    
+    return model_for_pricing
+
+
 @dataclass
 class TokenUsage:
     input_tokens: int = 0
@@ -50,14 +74,27 @@ class ModelsDotDev:
     # Models.dev API endpoint
     API_URL = "https://models.dev/api.json"
     
-    def __init__(self, quiet: bool = False):
+    # Cache TTL in seconds (1 hour)
+    CACHE_TTL = 3600
+    
+    def __init__(self, quiet: bool = False, bypass_cache: bool = False):
         self._quiet = quiet
+        self._bypass_cache = bypass_cache
         self._pricing_cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._cache_timestamp: Optional[float] = None
     
     def get_pricing(self) -> Dict[str, Dict[str, Any]]:
         """Get pricing data from models.dev API."""
-        # Return cached data if available
-        if self._pricing_cache is not None:
+        # Check if we should use cached data
+        current_time = time.time()
+        cache_is_valid = (
+            self._pricing_cache is not None and
+            self._cache_timestamp is not None and
+            not self._bypass_cache and
+            (current_time - self._cache_timestamp) < self.CACHE_TTL
+        )
+        
+        if cache_is_valid:
             return self._pricing_cache
             
         try:
@@ -103,8 +140,9 @@ class ModelsDotDev:
             if pricing and not self._quiet:
                 print(f"Fetched pricing for {len(pricing)} models from API")
             
-            # Cache the result
+            # Cache the result with timestamp
             self._pricing_cache = pricing
+            self._cache_timestamp = current_time
             return pricing
             
         except Exception as e:
@@ -182,12 +220,12 @@ class ModelsDotDev:
 
 
 class OpenCodeUsageAnalyzer:
-    def __init__(self, opencode_dir: Optional[str] = None, quiet: bool = False):
+    def __init__(self, opencode_dir: Optional[str] = None, quiet: bool = False, bypass_cache: bool = False):
         self.opencode_dir = opencode_dir or os.path.expanduser('~/.local/share/opencode')
         self.projects_dir = os.path.join(self.opencode_dir, 'project')
         self._quiet = quiet
         self._recent_count = 10
-        self.models_api = ModelsDotDev(quiet=quiet)
+        self.models_api = ModelsDotDev(quiet=quiet, bypass_cache=bypass_cache)
 
     def find_session_projects(self) -> List[str]:
         """Find all OpenCode project directories containing session data."""
@@ -322,13 +360,8 @@ class OpenCodeUsageAnalyzer:
         """Calculate estimated cost using ModelsDotDev pricing with model normalization."""
         pricing_data: Dict[str, Dict[str, Any]] = self.models_api.get_pricing()
 
-        # Normalize: strip known prefixes and nested prefixes
-        model_for_pricing = model
-        for prefix in ('anthropic/', 'openrouter/', 'openai/', 'groq/'):
-            if model_for_pricing.startswith(prefix):
-                model_for_pricing = model_for_pricing[len(prefix):]
-        if '/' in model_for_pricing:
-            model_for_pricing = model_for_pricing.split('/')[-1]
+        # Normalize model ID for pricing lookup
+        model_for_pricing = normalize_model_id_for_pricing(model)
 
         pricing = pricing_data.get(model_for_pricing)
         if pricing is None:
@@ -493,12 +526,12 @@ class OpenCodeUsageAnalyzer:
                     print(f"  {time_str} - {os.path.basename(session.project_path)}: {total_session_tokens:,} tokens (${session.cost:.4f})")
 
 class ClaudeUsageAnalyzer:
-    def __init__(self, claude_dir: Optional[str] = None, quiet: bool = False):
+    def __init__(self, claude_dir: Optional[str] = None, quiet: bool = False, bypass_cache: bool = False):
         self.claude_dir = claude_dir or os.path.expanduser('~/.claude')
         self.projects_dir = os.path.join(self.claude_dir, 'projects')
         self._quiet = quiet
         self._recent_count = 10
-        self.models_api = ModelsDotDev(quiet=quiet)
+        self.models_api = ModelsDotDev(quiet=quiet, bypass_cache=bypass_cache)
     
     def find_session_files(self) -> List[str]:
         """Find all .jsonl session files in the projects directory."""
@@ -565,10 +598,8 @@ class ClaudeUsageAnalyzer:
         """Calculate estimated cost based on token usage and model."""
         pricing_data: Dict[str, Dict[str, Any]] = self.models_api.get_pricing()
         
-        # Extract model name without provider prefix for pricing lookup
-        model_for_pricing = model
-        if '/' in model:
-            model_for_pricing = model.split('/', 1)[1]
+        # Normalize model ID for pricing lookup
+        model_for_pricing = normalize_model_id_for_pricing(model)
         
         pricing: Optional[Dict[str, Any]] = pricing_data.get(model_for_pricing)
         
@@ -759,11 +790,11 @@ class ClaudeUsageAnalyzer:
                 print(f"  {time_str} - {os.path.basename(session.project_path)}: {total_session_tokens:,} tokens (${cost:.4f})")
 
 
-def list_providers() -> int:
+def list_providers(bypass_cache: bool = False) -> int:
     """List all available providers from the models.dev API."""
     try:
         # Create a temporary ModelsDotDev instance to fetch provider data
-        models_api = ModelsDotDev(quiet=True)
+        models_api = ModelsDotDev(quiet=True, bypass_cache=bypass_cache)
         providers = models_api.get_providers_and_models()
         
         if not providers:
@@ -799,17 +830,17 @@ def list_providers() -> int:
         return 1
 
 
-def list_available_models(provider: Optional[str] = None) -> int:
+def list_available_models(provider: Optional[str] = None, bypass_cache: bool = False) -> int:
     """List models for a specific provider from the models.dev API."""
     if not provider:
         print("❌ Provider argument is required")
         print("💡 Use --list-providers to see available providers")
         print("📊 Example: uv run main.py --list-models anthropic")
         return 1
-        
+    
     try:
         # Create a temporary ModelsDotDev instance to fetch provider data
-        models_api = ModelsDotDev(quiet=True)
+        models_api = ModelsDotDev(quiet=True, bypass_cache=bypass_cache)
         providers = models_api.get_providers_and_models()
         
         if not providers:
@@ -881,10 +912,8 @@ def calculate_alternative_model_cost(
         # Check if the specific model is available in pricing data
         pricing_data: Dict[str, Dict[str, Any]] = claude_analyzer.models_api.get_pricing()
         
-        # Extract model name without provider prefix for pricing lookup
-        model_for_pricing = alternative_model
-        if '/' in alternative_model:
-            model_for_pricing = alternative_model.split('/', 1)[1]
+        # Normalize model ID for pricing lookup
+        model_for_pricing = normalize_model_id_for_pricing(alternative_model)
         
         if model_for_pricing not in pricing_data:
             return 0.0  # Model not found
@@ -1009,21 +1038,9 @@ def print_dedicated_comparison_summary(
         # Get pricing for current and alternative models
         pricing_data = claude_analyzer.models_api.get_pricing()
         
-        def clean_model_for_pricing(model_name: str) -> str:
-            """Clean model name for pricing lookup."""
-            # Remove common prefixes
-            for prefix in ['anthropic/', 'openrouter/', 'openai/', 'groq/']:
-                if model_name.startswith(prefix):
-                    model_name = model_name[len(prefix):]
-            # Handle nested prefixes like 'openrouter/openai/gpt-4o-mini'
-            if '/' in model_name:
-                parts = model_name.split('/')
-                model_name = parts[-1]  # Take the last part
-            return model_name
-        
         current_model_raw = next(iter(current_models)) if current_models else 'claude-sonnet-4-20250514'
-        current_model_for_pricing = clean_model_for_pricing(current_model_raw)
-        alt_model_for_pricing = clean_model_for_pricing(compare_model)
+        current_model_for_pricing = normalize_model_id_for_pricing(current_model_raw)
+        alt_model_for_pricing = normalize_model_id_for_pricing(compare_model)
         
         current_pricing = pricing_data.get(current_model_for_pricing, {})
         alt_pricing = pricing_data.get(alt_model_for_pricing, {})
@@ -1530,11 +1547,11 @@ def main() -> int:
     
     # Handle list-providers flag and exit early
     if args.list_providers:
-        return list_providers()
+        return list_providers(bypass_cache=args.no_cache)
     
     # Handle list-models flag and exit early
     if args.list_models:
-        return list_available_models(args.list_models)
+        return list_available_models(args.list_models, bypass_cache=args.no_cache)
     
     # Validate mutually exclusive options
     if args.claude_only and args.opencode_only:
@@ -1552,9 +1569,7 @@ def main() -> int:
             try:
                 # Make it quiet by default unless verbose is requested
                 claude_quiet = args.quiet or not args.verbose
-                claude_analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=claude_quiet)
-                
-                # Note: --no-cache flag is no longer needed as caching was removed
+                claude_analyzer = ClaudeUsageAnalyzer(claude_dir=args.claude_dir, quiet=claude_quiet, bypass_cache=args.no_cache)
                 
                 if os.path.exists(claude_analyzer.projects_dir):
                     claude_summaries = claude_analyzer.analyze_all_sessions()
@@ -1572,7 +1587,7 @@ def main() -> int:
             try:
                 # Make it quiet by default unless verbose is requested
                 opencode_quiet = args.quiet or not args.verbose
-                opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=opencode_quiet)  # type: ignore[name-defined]
+                opencode_analyzer = OpenCodeUsageAnalyzer(opencode_dir=args.opencode_dir, quiet=opencode_quiet, bypass_cache=args.no_cache)  # type: ignore[name-defined]
                 
                 if os.path.exists(opencode_analyzer.projects_dir):
                     opencode_summaries = opencode_analyzer.analyze_all_sessions()
